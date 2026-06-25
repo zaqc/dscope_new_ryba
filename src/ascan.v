@@ -9,7 +9,7 @@ module ascan #(
 )(
     // ADC clock domain (65 MHz)
     input  wire                    adc_clk,
-    input  wire                    adc_rst,
+    input  wire                    adc_rst_n,
     input  wire                    i_adc_sync,
     input  wire signed [11:0]      i_adc_data,
 
@@ -21,7 +21,7 @@ module ascan #(
 
     // System clock domain (80 MHz)
     input  wire                    sys_clk,
-    input  wire                    sys_rst,
+    input  wire                    sys_rst_n,
 
     // Stream Output Interface (sys_clk domain)
     output wire [31:0]             o_out_data,
@@ -32,15 +32,48 @@ module ascan #(
 );
 
     // -------------------------------------------------------------------------
-    // 1. Accumulator Submodule Instantiation
+    // Signal Declarations (Declared at the top for strict Verilog compliance)
     // -------------------------------------------------------------------------
+    
+    // Accumulator outputs
     wire [11:0] accum_data;
     wire        accum_vld;
     wire        accum_last;
 
+    // Packer outputs
+    wire [31:0] packed_word;
+    wire        packed_word_vld;
+    wire        packed_frame_done;
+
+    // Bank management (adc_clk domain)
+    reg                    write_bank;     // 0 or 1 (adc_clk domain)
+    reg [ADDR_WIDTH-1:0]   waddr;          // Write address pointer
+    reg [15:0]             frame_size_0;   // Captured size of Bank 0
+    reg [15:0]             frame_size_1;   // Captured size of Bank 1
+    reg                    bank_0_avail;   // Bank 0 contains complete valid frame
+    reg                    bank_1_avail;   // Bank 1 contains complete valid frame
+
+    // Synchronized clear flags (adc_clk domain)
+    wire                   bank_0_clear_adc;
+    wire                   bank_1_clear_adc;
+
+    // Synchronized available flags (sys_clk domain)
+    wire                   bank_0_avail_sys;
+    wire                   bank_1_avail_sys;
+    reg                    bank_0_clear_sys;
+    reg                    bank_1_clear_sys;
+
+    // RAM signals
+    wire [ADDR_WIDTH-1:0] raddr;
+    wire [31:0]           rdata_0;
+    wire [31:0]           rdata_1;
+
+    // -------------------------------------------------------------------------
+    // 1. Accumulator Submodule Instantiation
+    // -------------------------------------------------------------------------
     ascan_accum u_accum (
         .clk          (adc_clk),
-        .rst          (adc_rst),
+        .rst_n        (adc_rst_n),
         .i_sync       (i_adc_sync),
         .i_data       (i_adc_data),
         .i_n_samples  (i_n_samples),
@@ -55,13 +88,9 @@ module ascan #(
     // -------------------------------------------------------------------------
     // 2. Packer Submodule Instantiation
     // -------------------------------------------------------------------------
-    wire [31:0] packed_word;
-    wire        packed_word_vld;
-    wire        packed_frame_done;
-
     ascan_packer u_packer (
         .clk          (adc_clk),
-        .rst          (adc_rst),
+        .rst_n        (adc_rst_n),
         .i_data       (accum_data),
         .i_vld        (accum_vld),
         .i_last       (accum_last),
@@ -73,28 +102,18 @@ module ascan #(
     // -------------------------------------------------------------------------
     // 3. Ping-Pong Buffers ("Butterfly" Buffer) and CDC Handshake Logic
     // -------------------------------------------------------------------------
-    reg                    write_bank;     // 0 or 1 (adc_clk domain)
-    reg [ADDR_WIDTH-1:0]   waddr;          // Write address pointer
-    reg [15:0]             frame_size_0;   // Captured size of Bank 0
-    reg [15:0]             frame_size_1;   // Captured size of Bank 1
 
-    reg                    bank_0_avail;   // Bank 0 contains complete valid frame (adc_clk domain)
-    reg                    bank_1_avail;   // Bank 1 contains complete valid frame (adc_clk domain)
-
-    wire                   bank_0_clear_adc; // Cleared status synced back to adc_clk
-    wire                   bank_1_clear_adc;
-
-    // CDC: Synchronize clear signals from sys_clk to adc_clk domain
+    // CDC: Synchronize clear signals from sys_clk back to adc_clk domain
     ascan_sync #(.WIDTH(1)) u_sync_clear_0 (
         .clk   (adc_clk),
-        .rst   (adc_rst),
+        .rst_n (adc_rst_n),
         .i_sig (bank_0_clear_sys),
         .o_sig (bank_0_clear_adc)
     );
 
     ascan_sync #(.WIDTH(1)) u_sync_clear_1 (
         .clk   (adc_clk),
-        .rst   (adc_rst),
+        .rst_n (adc_rst_n),
         .i_sig (bank_1_clear_sys),
         .o_sig (bank_1_clear_adc)
     );
@@ -103,8 +122,8 @@ module ascan #(
     wire ram_we_0 = (write_bank == 1'b0) && packed_word_vld;
     wire ram_we_1 = (write_bank == 1'b1) && packed_word_vld;
 
-    always @(posedge adc_clk or posedge adc_rst) begin
-        if (adc_rst) begin
+    always @(posedge adc_clk) begin
+        if (!adc_rst_n) begin
             waddr        <= 0;
             write_bank   <= 1'b0;
             bank_0_avail <= 1'b0;
@@ -141,11 +160,7 @@ module ascan #(
         end
     end
 
-    // RAM Instances mapped to external dp_ram ports
-    wire [ADDR_WIDTH-1:0] raddr;
-    wire [31:0]           rdata_0;
-    wire [31:0]           rdata_1;
-
+    // RAM Instances mapped to external dp_ram ports (Switching handled internally in dp_ram based on TESTMODE)
     dp_ram #(
         .DATA_WIDTH(32),
         .ADDR_WIDTH(ADDR_WIDTH)
@@ -183,26 +198,21 @@ module ascan #(
     // -------------------------------------------------------------------------
     // 4. System Domain Processing and Readout Logic (sys_clk)
     // -------------------------------------------------------------------------
-    wire bank_0_avail_sys;
-    wire bank_1_avail_sys;
 
     // CDC: Synchronize available signals from adc_clk to sys_clk domain
     ascan_sync #(.WIDTH(1)) u_sync_avail_0 (
         .clk   (sys_clk),
-        .rst   (sys_rst),
+        .rst_n (sys_rst_n),
         .i_sig (bank_0_avail),
         .o_sig (bank_0_avail_sys)
     );
 
     ascan_sync #(.WIDTH(1)) u_sync_avail_1 (
         .clk   (sys_clk),
-        .rst   (sys_rst),
+        .rst_n (sys_rst_n),
         .i_sig (bank_1_avail),
         .o_sig (bank_1_avail_sys)
     );
-
-    reg bank_0_clear_sys;
-    reg bank_1_clear_sys;
 
     // FSM States for reading
     localparam R_IDLE  = 2'd0;
@@ -234,8 +244,8 @@ module ascan #(
     reg        ram_read_en;
     reg        ram_read_val;
 
-    always @(posedge sys_clk or posedge sys_rst) begin
-        if (sys_rst) begin
+    always @(posedge sys_clk) begin
+        if (!sys_rst_n) begin
             read_state       <= R_IDLE;
             read_bank        <= 1'b0;
             read_size        <= 16'd0;
@@ -320,8 +330,8 @@ module ascan #(
     wire fifo_push = ram_read_val;
     wire fifo_pop  = o_out_vld && i_out_rdy;
 
-    always @(posedge sys_clk or posedge sys_rst) begin
-        if (sys_rst) begin
+    always @(posedge sys_clk) begin
+        if (!sys_rst_n) begin
             fifo_wptr <= 2'd0;
             fifo_rptr <= 2'd0;
             fifo_cnt  <= 3'd0;
@@ -353,7 +363,7 @@ endmodule
 
 module ascan_accum (
     input  wire                    clk,
-    input  wire                    rst,
+    input  wire                    rst_n,
     input  wire                    i_sync,
     input  wire signed [11:0]      i_data,
 
@@ -375,8 +385,8 @@ module ascan_accum (
     reg [1:0]  r_accum_type;
     reg [15:0] r_skip_ticks;
 
-    always @(posedge clk or posedge rst) begin
-        if (rst) begin
+    always @(posedge clk) begin
+        if (!rst_n) begin
             r_n_samples  <= 16'd0;
             r_accum      <= 8'd1;
             r_accum_type <= 2'b00;
@@ -391,8 +401,8 @@ module ascan_accum (
 
     // Convert signed ADC inputs to absolute unsigned values (12-bit, max value 2048)
     reg [11:0] abs_data;
-    always @(posedge clk or posedge rst) begin
-        if (rst) begin
+    always @(posedge clk) begin
+        if (!rst_n) begin
             abs_data <= 12'd0;
         end else begin
             if (i_data[11]) begin
@@ -409,9 +419,9 @@ module ascan_accum (
 
     // Match start triggers with absolute data pipeline latency
     reg sync_reg;
-    always @(posedge clk or posedge rst) begin
-        if (rst) sync_reg <= 1'b0;
-        else     sync_reg <= i_sync;
+    always @(posedge clk) begin
+        if (!rst_n) sync_reg <= 1'b0;
+        else        sync_reg <= i_sync;
     end
 
     // FSM States
@@ -436,8 +446,8 @@ module ascan_accum (
     wire is_last_of_group = (accum_cnt == r_accum - 1'b1) || (sample_cnt == r_n_samples - 1'b1);
     wire is_last_of_frame = (sample_cnt == r_n_samples - 1'b1);
 
-    always @(posedge clk or posedge rst) begin
-        if (rst) begin
+    always @(posedge clk) begin
+        if (!rst_n) begin
             state          <= S_IDLE;
             skip_cnt       <= 16'd0;
             sample_cnt     <= 16'd0;
@@ -455,25 +465,61 @@ module ascan_accum (
                 S_IDLE: begin
                     if (sync_reg) begin
                         if (r_skip_ticks == 16'd0) begin
-                            state <= S_CAPTURE;
+                            // Cycle-aligned non-delayed capture of first sample (0)
+                            max_reg    <= abs_data;
+                            sum_reg    <= {8'd0, abs_data};
+                            dec_reg    <= abs_data;
+                            sample_cnt <= 16'd1;
+                            accum_cnt  <= 8'd1;
+
+                            if ((r_accum == 8'd1) || (r_n_samples == 16'd1)) begin
+                                group_done_raw <= 1'b1;
+                                accum_cnt      <= 8'd0;
+                                if (r_n_samples == 16'd1) begin
+                                    group_last_raw <= 1'b1;
+                                    state          <= S_IDLE;
+                                end else begin
+                                    state          <= S_CAPTURE;
+                                end
+                            end else begin
+                                state <= S_CAPTURE;
+                            end
                         end else begin
-                            state    <= S_SKIP;
-                            skip_cnt <= r_skip_ticks - 1'b1;
+                            state      <= S_SKIP;
+                            skip_cnt   <= r_skip_ticks - 1'b1;
+                            sample_cnt <= 16'd0;
+                            accum_cnt  <= 8'd0;
                         end
-                        sample_cnt <= 16'd0;
-                        accum_cnt  <= 8'd0;
                     end
                 end
 
                 S_SKIP: begin
                     skip_cnt <= skip_cnt - 1'b1;
                     if (skip_cnt == 16'd0) begin
-                        state <= S_CAPTURE;
+                        // Process first sample immediately after delay ends
+                        max_reg    <= abs_data;
+                        sum_reg    <= {8'd0, abs_data};
+                        dec_reg    <= abs_data;
+                        sample_cnt <= 16'd1;
+                        accum_cnt  <= 8'd1;
+
+                        if ((r_accum == 8'd1) || (r_n_samples == 16'd1)) begin
+                            group_done_raw <= 1'b1;
+                            accum_cnt      <= 8'd0;
+                            if (r_n_samples == 16'd1) begin
+                                group_last_raw <= 1'b1;
+                                state          <= S_IDLE;
+                            end else begin
+                                state          <= S_CAPTURE;
+                            end
+                        end else begin
+                            state <= S_CAPTURE;
+                        end
                     end
                 end
 
                 S_CAPTURE: begin
-                    // Store / update data in accumulation registers
+                    // Store / update data in accumulation registers for subsequent samples
                     if (accum_cnt == 8'd0) begin
                         max_reg <= abs_data;
                         sum_reg <= {8'd0, abs_data};
@@ -497,6 +543,8 @@ module ascan_accum (
                         end
                     end
                 end
+
+                default: state <= S_IDLE;
             endcase
         end
     end
@@ -504,8 +552,8 @@ module ascan_accum (
     // Pipeline Stage 2: Combinational decision aligned with Divider delay
     wire [7:0] divisor = (r_accum == 8'd0) ? 8'd1 : r_accum;
 
-    always @(posedge clk or posedge rst) begin
-        if (rst) begin
+    always @(posedge clk) begin
+        if (!rst_n) begin
             o_vld  <= 1'b0;
             o_last <= 1'b0;
             o_data <= 12'd0;
@@ -515,22 +563,10 @@ module ascan_accum (
 
             if (group_done_raw) begin
                 case (r_accum_type)
-                    2'b00: begin // Peak Detector
-                        o_data <= (accum_cnt == 8'd0) ? abs_data : ((abs_data > max_reg) ? abs_data : max_reg);
-                    end
-                    2'b01: begin // Integrator (Average)
-                        if (accum_cnt == 8'd0) begin
-                            o_data <= abs_data;
-                        end else begin
-                            o_data <= (sum_reg + abs_data) / divisor;
-                        end
-                    end
-                    2'b10: begin // Decimation
-                        o_data <= (accum_cnt == 8'd0) ? abs_data : dec_reg;
-                    end
-                    default: begin
-                        o_data <= (accum_cnt == 8'd0) ? abs_data : dec_reg;
-                    end
+                    2'b00:   o_data <= max_reg;                 // Peak Detector
+                    2'b01:   o_data <= sum_reg[19:0] / divisor; // Integrator (Average)
+                    2'b10:   o_data <= dec_reg;                 // Decimation
+                    default: o_data <= dec_reg;
                 endcase
             end
         end
@@ -545,7 +581,7 @@ endmodule
 
 module ascan_packer (
     input  wire                    clk,
-    input  wire                    rst,
+    input  wire                    rst_n,
     input  wire [11:0]             i_data,
     input  wire                    i_vld,
     input  wire                    i_last,
@@ -560,8 +596,12 @@ module ascan_packer (
     reg        flush_active;
     reg [31:0] flush_buf;
 
-    always @(posedge clk or posedge rst) begin
-        if (rst) begin
+    // Temporary variables declared at module level for strict compliance
+    reg [63:0] next_bit_buf;
+    reg [5:0]  next_bit_cnt;
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
             bit_buf      <= 64'd0;
             bit_cnt      <= 6'd0;
             o_word       <= 32'd0;
@@ -569,14 +609,13 @@ module ascan_packer (
             o_frame_done <= 1'b0;
             flush_active <= 1'b0;
             flush_buf    <= 32'd0;
+            next_bit_buf  = 64'd0;
+            next_bit_cnt  = 6'd0;
         end else begin
             o_word_vld   <= 1'b0;
             o_frame_done <= 1'b0;
 
             if (i_vld) begin
-                reg [63:0] next_bit_buf;
-                reg [5:0]  next_bit_cnt;
-
                 // Append incoming 12-bit sample to current bit position
                 next_bit_buf = bit_buf | ({{52{1'b0}}, i_data} << bit_cnt);
                 next_bit_cnt = bit_cnt + 6'd12;
@@ -621,5 +660,36 @@ module ascan_packer (
             end
         end
     end
+
+endmodule
+
+
+// =========================================================================
+// Auxiliary Module: CDC Safe Synchronizer Stage (ascan_sync)
+// =========================================================================
+
+module ascan_sync #(
+    parameter WIDTH = 1
+)(
+    input  wire             clk,
+    input  wire             rst_n,
+    input  wire [WIDTH-1:0] i_sig,
+    output wire [WIDTH-1:0] o_sig
+);
+
+    reg [WIDTH-1:0] sync_reg_0;
+    reg [WIDTH-1:0] sync_reg_1;
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            sync_reg_0 <= {WIDTH{1'b0}};
+            sync_reg_1 <= {WIDTH{1'b0}};
+        end else begin
+            sync_reg_0 <= i_sig;
+            sync_reg_1 <= sync_reg_0;
+        end
+    end
+
+    assign o_sig = sync_reg_1;
 
 endmodule

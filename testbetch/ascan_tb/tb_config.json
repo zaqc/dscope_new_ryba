@@ -1,7 +1,6 @@
 {
   "tbName": "ascan_tb",
   "filesToInclude": [
-    "src/async_sync.v",
     "src/ascan.v",
     "src/rst_sync.v",
     "src/dp_ram.v",

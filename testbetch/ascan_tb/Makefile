@@ -9,7 +9,7 @@ WAVE_VCD = ascan_tb.vcd
 WAVE_CFG = ascan_tb.gtkw
 
 # Source files
-SOURCES = ../../src/async_sync.v ../../src/ascan.v ../../src/rst_sync.v ../../src/dp_ram.v ascan_tb.v
+SOURCES = ../../src/ascan.v ../../src/rst_sync.v ../../src/dp_ram.v ascan_tb.v
 
 # Compiler flags
 FLAGS = -Wall -Winfloop -g2005-sv -DTESTMODE=1 -DTARGET_NAME="\""$(TARGET)"\""

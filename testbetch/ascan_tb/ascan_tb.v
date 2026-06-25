@@ -14,15 +14,16 @@ module ascan_tb;
     // 80 MHz clock: Period = 12.5 ns (6.25 ns half-period)
     always #6.25 sys_clk = ~sys_clk;
 
-    reg adc_rst = 1;
-    reg sys_rst = 1;
+    // Synchronous active-low resets
+    reg adc_rst_n = 0;
+    reg sys_rst_n = 0;
 
     initial begin
         #100;
         @(posedge adc_clk);
-        adc_rst <= 1'b0;
+        adc_rst_n <= 1'b1;
         @(posedge sys_clk);
-        sys_rst <= 1'b0;
+        sys_rst_n <= 1'b1;
     end
 
     // -------------------------------------------------------------------------
@@ -48,7 +49,7 @@ module ascan_tb;
         .ADDR_WIDTH(10) // Use smaller address width for faster simulation
     ) u_ascan (
         .adc_clk      (adc_clk),
-        .adc_rst      (adc_rst),
+        .adc_rst_n    (adc_rst_n),
         .i_adc_sync   (i_adc_sync),
         .i_adc_data   (i_adc_data),
         
@@ -58,7 +59,7 @@ module ascan_tb;
         .i_skip_ticks (i_skip_ticks),
 
         .sys_clk      (sys_clk),
-        .sys_rst      (sys_rst),
+        .sys_rst_n    (sys_rst_n),
 
         .o_out_data   (o_out_data),
         .o_out_vld    (o_out_vld),
@@ -71,8 +72,8 @@ module ascan_tb;
     // 4. Predictable ADC Test Data Source
     // -------------------------------------------------------------------------
     reg signed [11:0] adc_val = 12'sh000;
-    always @(posedge adc_clk or posedge adc_rst) begin
-        if (adc_rst) begin
+    always @(posedge adc_clk) begin
+        if (!adc_rst_n) begin
             adc_val    <= 12'sh00A; // start at 10
             i_adc_data <= 12'sh000;
         end else begin
@@ -97,8 +98,8 @@ module ascan_tb;
     reg rdy_reg = 0;
     assign i_out_rdy = rdy_reg;
 
-    always @(posedge sys_clk or posedge sys_rst) begin
-        if (sys_rst) begin
+    always @(posedge sys_clk) begin
+        if (!sys_rst_n) begin
             rdy_reg <= 1'b0;
         end else begin
             // Simulates randomized receiver backpressure (80% probability of being ready)
@@ -109,7 +110,7 @@ module ascan_tb;
     // Track and log output data packets
     integer rx_word_idx = 0;
     always @(posedge sys_clk) begin
-        if (!sys_rst && o_out_vld && i_out_rdy) begin
+        if (sys_rst_n && o_out_vld && i_out_rdy) begin
             $display("[SYS_CLK @ %0t ns] Out Word[%0d]: 32'h%h (Bits: %b)", 
                      $time, rx_word_idx, o_out_data, o_out_data);
             rx_word_idx = rx_word_idx + 1;
@@ -158,8 +159,8 @@ module ascan_tb;
 `endif
         $dumpvars(0, ascan_tb);
 
-        // Wait for resets to clear
-        wait(adc_rst == 0 && sys_rst == 0);
+        // Wait for resets to clear (resets are active-low, wait for high)
+        wait(adc_rst_n == 1'b1 && sys_rst_n == 1'b1);
         #100;
 
         // ---------------------------------------------------------
@@ -169,7 +170,7 @@ module ascan_tb;
         // No skip ticks.
         // ---------------------------------------------------------
         rx_word_idx = 0;
-        trigger_measurement(.samples(16'd16), .accum(8'd2), .accum_type(2'b00), .skip(16'd0));
+        trigger_measurement(16'd16, 8'd2, 2'b00, 16'd0);
         
         // Wait until system clock domain flags that data is ready and transmitted
         wait(o_data_ready == 1'b1);
@@ -183,7 +184,7 @@ module ascan_tb;
         // Skip ticks: 4 cycles
         // ---------------------------------------------------------
         rx_word_idx = 0;
-        trigger_measurement(.samples(16'd12), .accum(8'd3), .accum_type(2'b01), .skip(16'd4));
+        trigger_measurement(16'd12, 8'd3, 2'b01, 16'd4);
         
         wait(o_data_ready == 1'b1);
         wait(rx_word_idx == 2);
@@ -196,7 +197,7 @@ module ascan_tb;
         // Skip ticks: 2 cycles
         // ---------------------------------------------------------
         rx_word_idx = 0;
-        trigger_measurement(.samples(16'd16), .accum(8'd4), .accum_type(2'b10), .skip(16'd2));
+        trigger_measurement(16'd16, 8'd4, 2'b10, 16'd2);
         
         wait(o_data_ready == 1'b1);
         wait(rx_word_idx == 2);
@@ -208,69 +209,4 @@ module ascan_tb;
         $finish;
     end
 
-endmodule
-
-
-// =========================================================================
-// Emulation Module: Dual-Port RAM (dp_ram)
-// =========================================================================
-module dp_ram #(
-    parameter DATA_WIDTH = 32,
-    parameter ADDR_WIDTH = 15
-)(
-    input  wire                    clk_a,
-    input  wire [ADDR_WIDTH-1:0]   addr_a,
-    input  wire                    we_a,
-    input  wire [DATA_WIDTH-1:0]   d_a,
-    output reg  [DATA_WIDTH-1:0]   q_a,
-
-    input  wire                    clk_b,
-    input  wire [ADDR_WIDTH-1:0]   addr_b,
-    input  wire                    we_b,
-    input  wire [DATA_WIDTH-1:0]   d_b,
-    output reg  [DATA_WIDTH-1:0]   q_b
-);
-    reg [DATA_WIDTH-1:0] ram [0:(1<<ADDR_WIDTH)-1];
-
-    always @(posedge clk_a) begin
-        if (we_a) begin
-            ram[addr_a] <= d_a;
-        end
-        q_a <= ram[addr_a];
-    end
-
-    always @(posedge clk_b) begin
-        if (we_b) begin
-            ram[addr_b] <= d_b;
-        end
-        q_b <= ram[addr_b];
-    end
-endmodule
-
-
-// =========================================================================
-// Emulation Module: Multi-bit Clock Domain Crossing (ascan_sync)
-// =========================================================================
-module ascan_sync #(
-    parameter WIDTH = 1
-)(
-    input  wire             clk,
-    input  wire             rst,
-    input  wire [WIDTH-1:0] i_sig,
-    output reg  [WIDTH-1:0] o_sig
-);
-    reg [WIDTH-1:0] sync_stage_1;
-    reg [WIDTH-1:0] sync_stage_2;
-
-    always @(posedge clk or posedge rst) begin
-        if (rst) begin
-            sync_stage_1 <= {WIDTH{1'b0}};
-            sync_stage_2 <= {WIDTH{1'b0}};
-            o_sig        <= {WIDTH{1'b0}};
-        end else begin
-            sync_stage_1 <= i_sig;
-            sync_stage_2 <= sync_stage_1;
-            o_sig        <= sync_stage_2;
-        end
-    end
 endmodule
