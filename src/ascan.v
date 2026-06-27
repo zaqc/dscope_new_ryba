@@ -27,8 +27,8 @@ module ascan #(
     output wire [31:0]             o_out_data,
     output wire                    o_out_vld,
     input  wire                    i_out_rdy,
-    output reg  [15:0]             o_out_size,
-    output reg                     o_data_ready
+    output wire [15:0]             o_out_size,
+    output wire                    o_data_ready
 );
 
     // -------------------------------------------------------------------------
@@ -44,29 +44,6 @@ module ascan #(
     wire [31:0] packed_word;
     wire        packed_word_vld;
     wire        packed_frame_done;
-
-    // Bank management (adc_clk domain)
-    reg                    write_bank;     // 0 or 1 (adc_clk domain)
-    reg [ADDR_WIDTH-1:0]   waddr;          // Write address pointer
-    reg [15:0]             frame_size_0;   // Captured size of Bank 0
-    reg [15:0]             frame_size_1;   // Captured size of Bank 1
-    reg                    bank_0_avail;   // Bank 0 contains complete valid frame
-    reg                    bank_1_avail;   // Bank 1 contains complete valid frame
-
-    // Synchronized clear flags (adc_clk domain)
-    wire                   bank_0_clear_adc;
-    wire                   bank_1_clear_adc;
-
-    // Synchronized available flags (sys_clk domain)
-    wire                   bank_0_avail_sys;
-    wire                   bank_1_avail_sys;
-    reg                    bank_0_clear_sys;
-    reg                    bank_1_clear_sys;
-
-    // RAM signals
-    wire [ADDR_WIDTH-1:0] raddr;
-    wire [31:0]           rdata_0;
-    wire [31:0]           rdata_1;
 
     // -------------------------------------------------------------------------
     // 1. Accumulator Submodule Instantiation
@@ -100,122 +77,79 @@ module ascan #(
     );
 
     // -------------------------------------------------------------------------
-    // 3. Ping-Pong Buffers ("Butterfly" Buffer) and CDC Handshake Logic
+    // 3. Ping-Pong Buffer and Readout Controller Instantiation
     // -------------------------------------------------------------------------
+    ascan_buffer #(
+        .ADDR_WIDTH (ADDR_WIDTH)
+    ) u_buffer (
+        // ADC Clock Domain
+        .adc_clk             (adc_clk),
+        .adc_rst_n           (adc_rst_n),
+        .i_packed_word       (packed_word),
+        .i_packed_word_vld   (packed_word_vld),
+        .i_packed_frame_done (packed_frame_done),
 
-    // CDC: Synchronize clear signals from sys_clk back to adc_clk domain
-    ascan_sync #(.WIDTH(1)) u_sync_clear_0 (
-        .clk   (adc_clk),
-        .rst_n (adc_rst_n),
-        .i_sig (bank_0_clear_sys),
-        .o_sig (bank_0_clear_adc)
+        // System Clock Domain
+        .sys_clk             (sys_clk),
+        .sys_rst_n           (sys_rst_n),
+        .o_out_data          (o_out_data),
+        .o_out_vld           (o_out_vld),
+        .i_out_rdy           (i_out_rdy),
+        .o_out_size          (o_out_size),
+        .o_data_ready        (o_data_ready)
     );
 
-    // CDC: Synchronize clear signals from sys_clk back to adc_clk domain
-    ascan_sync #(.WIDTH(1)) u_sync_clear_1 (
-        .clk   (adc_clk),
-        .rst_n (adc_rst_n),
-        .i_sig (bank_1_clear_sys),
-        .o_sig (bank_1_clear_adc)
-    );
+endmodule
 
-    // Writing Control Logic (adc_clk domain)
-    wire ram_we_0 = (write_bank == 1'b0) && packed_word_vld;
-    wire ram_we_1 = (write_bank == 1'b1) && packed_word_vld;
 
-    always @(posedge adc_clk) begin
-        if (!adc_rst_n) begin
-            waddr        <= 0;
-            write_bank   <= 1'b0;
-            bank_0_avail <= 1'b0;
-            bank_1_avail <= 1'b0;
-            frame_size_0 <= 16'd0;
-            frame_size_1 <= 16'd0;
-        end else begin
-            // Lower availability flag once sys_clk domain finished reading and cleared it
-            if (bank_0_clear_adc) begin
-                bank_0_avail <= 1'b0;
-            end
-            if (bank_1_clear_adc) begin
-                bank_1_avail <= 1'b0;
-            end
+// =========================================================================
+// Auxiliary Module: Ping-Pong Double Buffer and Readout Controller
+// =========================================================================
 
-            // Increment write address on new word
-            if (packed_word_vld) begin
-                waddr <= waddr + 1'b1;
-            end
+module ascan_buffer #(
+    parameter ADDR_WIDTH = 15
+)(
+    // ADC clock domain
+    input  wire                    adc_clk,
+    input  wire                    adc_rst_n,
+    input  wire [31:0]             i_packed_word,
+    input  wire                    i_packed_word_vld,
+    input  wire                    i_packed_frame_done,
 
-            // Complete frame written, commit size and switch bank
-            if (packed_frame_done) begin
-                if (write_bank == 1'b0) begin
-                    frame_size_0 <= waddr + (packed_word_vld ? 1'b1 : 1'b0);
-                    bank_0_avail <= 1'b1;
-                    write_bank   <= 1'b1;
-                end else begin
-                    frame_size_1 <= waddr + (packed_word_vld ? 1'b1 : 1'b0);
-                    bank_1_avail <= 1'b1;
-                    write_bank   <= 1'b0;
-                end
-                waddr <= 0;
-            end
-        end
-    end
+    // System clock domain
+    input  wire                    sys_clk,
+    input  wire                    sys_rst_n,
+    output wire [31:0]             o_out_data,
+    output wire                    o_out_vld,
+    input  wire                    i_out_rdy,
+    output reg  [15:0]             o_out_size,
+    output reg                     o_data_ready
+);
 
-    // RAM Instances mapped to external dp_ram ports
-    dp_ram #(
-        .DATA_WIDTH(32),
-        .ADDR_WIDTH(ADDR_WIDTH)
-    ) u_ram_bank_0 (
-        .clk_a  (adc_clk),
-        .addr_a (waddr),
-        .we_a   (ram_we_0),
-        .d_a    (packed_word),
-        .q_a    (),
+    // Bank management registers (adc_clk domain)
+    reg                    write_bank;     // 0 or 1
+    reg [ADDR_WIDTH-1:0]   waddr;          // Write address pointer
+    reg [15:0]             frame_size_0;   // Captured size of Bank 0
+    reg [15:0]             frame_size_1;   // Captured size of Bank 1
+    reg                    bank_0_avail;   // Bank 0 contains complete valid frame
+    reg                    bank_1_avail;   // Bank 1 contains complete valid frame
 
-        .clk_b  (sys_clk),
-        .addr_b (raddr),
-        .we_b   (1'b0),
-        .d_b    (32'd0),
-        .q_b    (rdata_0)
-    );
+    // Synchronized clear flags (adc_clk domain)
+    wire                   bank_0_clear_adc;
+    wire                   bank_1_clear_adc;
 
-    dp_ram #(
-        .DATA_WIDTH(32),
-        .ADDR_WIDTH(ADDR_WIDTH)
-    ) u_ram_bank_1 (
-        .clk_a  (adc_clk),
-        .addr_a (waddr),
-        .we_a   (ram_we_1),
-        .d_a    (packed_word),
-        .q_a    (),
+    // Synchronized available flags (sys_clk domain)
+    wire                   bank_0_avail_sys;
+    wire                   bank_1_avail_sys;
+    reg                    bank_0_clear_sys;
+    reg                    bank_1_clear_sys;
 
-        .clk_b  (sys_clk),
-        .addr_b (raddr),
-        .we_b   (1'b0),
-        .d_b    (32'd0),
-        .q_b    (rdata_1)
-    );
+    // RAM signals
+    wire [ADDR_WIDTH-1:0] raddr;
+    wire [31:0]           rdata_0;
+    wire [31:0]           rdata_1;
 
-    // -------------------------------------------------------------------------
-    // 4. System Domain Processing and Readout Logic (sys_clk)
-    // -------------------------------------------------------------------------
-
-    // CDC: Synchronize available signals from adc_clk to sys_clk domain
-    ascan_sync #(.WIDTH(1)) u_sync_avail_0 (
-        .clk   (sys_clk),
-        .rst_n (sys_rst_n),
-        .i_sig (bank_0_avail),
-        .o_sig (bank_0_avail_sys)
-    );
-
-    ascan_sync #(.WIDTH(1)) u_sync_avail_1 (
-        .clk   (sys_clk),
-        .rst_n (sys_rst_n),
-        .i_sig (bank_1_avail),
-        .o_sig (bank_1_avail_sys)
-    );
-
-    // FSM States for reading
+    // FSM States for reading (sys_clk domain)
     localparam R_IDLE  = 2'd0;
     localparam R_READ  = 2'd1;
     localparam R_CLEAR = 2'd2;
@@ -245,6 +179,127 @@ module ascan #(
     reg        ram_read_en;
     reg        ram_read_val;
 
+    // Track total words currently in flight or inside FIFO
+    wire [3:0] fifo_total = fifo_cnt + ram_read_val + ram_read_en;
+
+    // -------------------------------------------------------------------------
+    // CDC Synchronization Instantiations
+    // -------------------------------------------------------------------------
+    
+    // CDC: Synchronize clear signals from sys_clk back to adc_clk domain
+    ascan_sync #(.WIDTH(1)) u_sync_clear_0 (
+        .clk   (adc_clk),
+        .rst_n (adc_rst_n),
+        .i_sig (bank_0_clear_sys),
+        .o_sig (bank_0_clear_adc)
+    );
+
+    ascan_sync #(.WIDTH(1)) u_sync_clear_1 (
+        .clk   (adc_clk),
+        .rst_n (adc_rst_n),
+        .i_sig (bank_1_clear_sys),
+        .o_sig (bank_1_clear_adc)
+    );
+
+    // CDC: Synchronize available signals from adc_clk to sys_clk domain
+    ascan_sync #(.WIDTH(1)) u_sync_avail_0 (
+        .clk   (sys_clk),
+        .rst_n (sys_rst_n),
+        .i_sig (bank_0_avail),
+        .o_sig (bank_0_avail_sys)
+    );
+
+    ascan_sync #(.WIDTH(1)) u_sync_avail_1 (
+        .clk   (sys_clk),
+        .rst_n (sys_rst_n),
+        .i_sig (bank_1_avail),
+        .o_sig (bank_1_avail_sys)
+    );
+
+    // -------------------------------------------------------------------------
+    // Dual-Port RAM Bank Instantiations
+    // -------------------------------------------------------------------------
+    wire ram_we_0 = (write_bank == 1'b0) && i_packed_word_vld;
+    wire ram_we_1 = (write_bank == 1'b1) && i_packed_word_vld;
+
+    dp_ram #(
+        .DATA_WIDTH(32),
+        .ADDR_WIDTH(ADDR_WIDTH)
+    ) u_ram_bank_0 (
+        .clk_a  (adc_clk),
+        .addr_a (waddr),
+        .we_a   (ram_we_0),
+        .d_a    (i_packed_word),
+        .q_a    (),
+
+        .clk_b  (sys_clk),
+        .addr_b (raddr),
+        .we_b   (1'b0),
+        .d_b    (32'd0),
+        .q_b    (rdata_0)
+    );
+
+    dp_ram #(
+        .DATA_WIDTH(32),
+        .ADDR_WIDTH(ADDR_WIDTH)
+    ) u_ram_bank_1 (
+        .clk_a  (adc_clk),
+        .addr_a (waddr),
+        .we_a   (ram_we_1),
+        .d_a    (i_packed_word),
+        .q_a    (),
+
+        .clk_b  (sys_clk),
+        .addr_b (raddr),
+        .we_b   (1'b0),
+        .d_b    (32'd0),
+        .q_b    (rdata_1)
+    );
+
+    // -------------------------------------------------------------------------
+    // Buffer Writing Control Logic (adc_clk domain)
+    // -------------------------------------------------------------------------
+    always @(posedge adc_clk) begin
+        if (!adc_rst_n) begin
+            waddr        <= 0;
+            write_bank   <= 1'b0;
+            bank_0_avail <= 1'b0;
+            bank_1_avail <= 1'b0;
+            frame_size_0 <= 16'd0;
+            frame_size_1 <= 16'd0;
+        end else begin
+            // Lower availability flag once sys_clk domain finished reading and cleared it
+            if (bank_0_clear_adc) begin
+                bank_0_avail <= 1'b0;
+            end
+            if (bank_1_clear_adc) begin
+                bank_1_avail <= 1'b0;
+            end
+
+            // Increment write address on new word
+            if (i_packed_word_vld) begin
+                waddr <= waddr + 1'b1;
+            end
+
+            // Complete frame written, commit size and switch bank
+            if (i_packed_frame_done) begin
+                if (write_bank == 1'b0) begin
+                    frame_size_0 <= waddr + (i_packed_word_vld ? 1'b1 : 1'b0);
+                    bank_0_avail <= 1'b1;
+                    write_bank   <= 1'b1;
+                end else begin
+                    frame_size_1 <= waddr + (i_packed_word_vld ? 1'b1 : 1'b0);
+                    bank_1_avail <= 1'b1;
+                    write_bank   <= 1'b0;
+                end
+                waddr <= 0;
+            end
+        end
+    end
+
+    // -------------------------------------------------------------------------
+    // Readout State Machine & Streaming Interface (sys_clk domain)
+    // -------------------------------------------------------------------------
     always @(posedge sys_clk) begin
         if (!sys_rst_n) begin
             read_state       <= R_IDLE;
@@ -290,7 +345,7 @@ module ascan #(
                 R_READ: begin
                     o_data_ready <= 1'b1;
                     // Read from RAM if there is space in output FIFO and more words are left
-                    if ((raddr_cnt < read_size) && (fifo_cnt + ram_read_en < 3'd4)) begin
+                    if ((raddr_cnt < read_size) && (fifo_total < 4'd4)) begin
                         ram_read_en <= 1'b1;
                         raddr_reg   <= raddr_reg + 1'b1;
                         raddr_cnt   <= raddr_cnt + 1'b1;
@@ -327,7 +382,9 @@ module ascan #(
         end
     end
 
-    // Output FIFO Controller (Sync)
+    // -------------------------------------------------------------------------
+    // Output Stream FIFO (0-bubble performance with backpressure support)
+    // -------------------------------------------------------------------------
     wire fifo_push = ram_read_val;
     wire fifo_pop  = o_out_vld && i_out_rdy;
 
@@ -553,6 +610,16 @@ module ascan_accum (
     // Pipeline Stage 2: Combinational decision aligned with Divider delay
     wire [7:0] divisor = (r_accum == 8'd0) ? 8'd1 : r_accum;
 
+    // Advanced combinational look-ahead logic to resolve Verilog non-blocking assignment delay
+    wire [11:0] comb_max = (accum_cnt == 8'd0) ? abs_data : 
+                           ((abs_data > max_reg) ? abs_data : max_reg);
+                           
+    wire [19:0] comb_sum = (accum_cnt == 8'd0) ? {8'd0, abs_data} : 
+                           (sum_reg + abs_data);
+                           
+    // Robust decimation lookahead fix: select abs_data on start-of-group cycle, else use registered dec_reg
+    wire [11:0] comb_dec = (accum_cnt == 8'd0) ? abs_data : dec_reg;
+
     always @(posedge clk) begin
         if (!rst_n) begin
             o_vld  <= 1'b0;
@@ -564,10 +631,10 @@ module ascan_accum (
 
             if (group_done_raw) begin
                 case (r_accum_type)
-                    2'b00:   o_data <= max_reg;                 // Peak Detector
-                    2'b01:   o_data <= sum_reg[19:0] / divisor; // Integrator (Average)
-                    2'b10:   o_data <= dec_reg;                 // Decimation
-                    default: o_data <= dec_reg;
+                    2'b00:   o_data <= comb_max;                 // Peak Detector
+                    2'b01:   o_data <= comb_sum[19:0] / divisor; // Integrator (Average)
+                    2'b10:   o_data <= comb_dec;                 // Decimation
+                    default: o_data <= comb_dec;
                 endcase
             end
         end

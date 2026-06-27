@@ -272,17 +272,20 @@ module ascan_tb;
             $finish;
         end
 
-        // Читаем по потоковой шине с рандомизированным i_out_rdy
+        // Читаем по потоковой шине с рандомизированным i_out_rdy на спаде такта
         rx_word_cnt = 0;
         while (rx_word_cnt < expected_words) begin
-            rdy_reg <= ($random % 10) < 8; // Готов в 80% тактов
+            @(negedge sys_clk);
+            rdy_reg = ($random % 10) < 8; // Готов в 80% тактов
+            
             @(posedge sys_clk);
             if (o_out_vld && i_out_rdy) begin
                 rx_frame_buffer[rx_word_cnt] = o_out_data;
                 rx_word_cnt = rx_word_cnt + 1;
             end
         end
-        rdy_reg <= 1'b0;
+        @(negedge sys_clk);
+        rdy_reg = 1'b0;
         wait(o_data_ready == 1'b0); // Убеждаемся, что флаг готовности снят после вычитки
         #100;
         unpack_and_verify(num_points);
@@ -301,14 +304,17 @@ module ascan_tb;
 
         rx_word_cnt = 0;
         while (rx_word_cnt < expected_words) begin
-            rdy_reg <= ($random % 10) < 8;
+            @(negedge sys_clk);
+            rdy_reg = ($random % 10) < 8;
+            
             @(posedge sys_clk);
             if (o_out_vld && i_out_rdy) begin
                 rx_frame_buffer[rx_word_cnt] = o_out_data;
                 rx_word_cnt = rx_word_cnt + 1;
             end
         end
-        rdy_reg <= 1'b0;
+        @(negedge sys_clk);
+        rdy_reg = 1'b0;
         wait(o_data_ready == 1'b0);
         #100;
         unpack_and_verify(num_points);
@@ -327,14 +333,17 @@ module ascan_tb;
 
         rx_word_cnt = 0;
         while (rx_word_cnt < expected_words) begin
-            rdy_reg <= ($random % 10) < 8;
+            @(negedge sys_clk);
+            rdy_reg = ($random % 10) < 8;
+            
             @(posedge sys_clk);
             if (o_out_vld && i_out_rdy) begin
                 rx_frame_buffer[rx_word_cnt] = o_out_data;
                 rx_word_cnt = rx_word_cnt + 1;
             end
         end
-        rdy_reg <= 1'b0;
+        @(negedge sys_clk);
+        rdy_reg = 1'b0;
         wait(o_data_ready == 1'b0);
         #100;
         unpack_and_verify(num_points);
@@ -353,14 +362,17 @@ module ascan_tb;
 
         rx_word_cnt = 0;
         while (rx_word_cnt < expected_words) begin
-            rdy_reg <= ($random % 10) < 8;
+            @(negedge sys_clk);
+            rdy_reg = ($random % 10) < 8;
+            
             @(posedge sys_clk);
             if (o_out_vld && i_out_rdy) begin
                 rx_frame_buffer[rx_word_cnt] = o_out_data;
                 rx_word_cnt = rx_word_cnt + 1;
             end
         end
-        rdy_reg <= 1'b0;
+        @(negedge sys_clk);
+        rdy_reg = 1'b0;
         wait(o_data_ready == 1'b0);
         #100;
         unpack_and_verify(num_points);
@@ -379,14 +391,17 @@ module ascan_tb;
 
         rx_word_cnt = 0;
         while (rx_word_cnt < expected_words) begin
-            rdy_reg <= ($random % 10) < 8;
+            @(negedge sys_clk);
+            rdy_reg = ($random % 10) < 8;
+            
             @(posedge sys_clk);
             if (o_out_vld && i_out_rdy) begin
                 rx_frame_buffer[rx_word_cnt] = o_out_data;
                 rx_word_cnt = rx_word_cnt + 1;
             end
         end
-        rdy_reg <= 1'b0;
+        @(negedge sys_clk);
+        rdy_reg = 1'b0;
         wait(o_data_ready == 1'b0);
         #100;
         unpack_and_verify(num_points);
@@ -405,14 +420,17 @@ module ascan_tb;
 
         rx_word_cnt = 0;
         while (rx_word_cnt < expected_words) begin
-            rdy_reg <= ($random % 10) < 8;
+            @(negedge sys_clk);
+            rdy_reg = ($random % 10) < 8;
+            
             @(posedge sys_clk);
             if (o_out_vld && i_out_rdy) begin
                 rx_frame_buffer[rx_word_cnt] = o_out_data;
                 rx_word_cnt = rx_word_cnt + 1;
             end
         end
-        rdy_reg <= 1'b0;
+        @(negedge sys_clk);
+        rdy_reg = 1'b0;
         wait(o_data_ready == 1'b0);
         #100;
         unpack_and_verify(num_points);
