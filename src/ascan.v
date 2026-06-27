@@ -32,7 +32,7 @@ module ascan #(
 );
 
     // -------------------------------------------------------------------------
-    // Signal Declarations (Declared at the top for strict Verilog compliance)
+    // Signal Declarations
     // -------------------------------------------------------------------------
     
     // Accumulator outputs
@@ -111,6 +111,7 @@ module ascan #(
         .o_sig (bank_0_clear_adc)
     );
 
+    // CDC: Synchronize clear signals from sys_clk back to adc_clk domain
     ascan_sync #(.WIDTH(1)) u_sync_clear_1 (
         .clk   (adc_clk),
         .rst_n (adc_rst_n),
@@ -160,7 +161,7 @@ module ascan #(
         end
     end
 
-    // RAM Instances mapped to external dp_ram ports (Switching handled internally in dp_ram based on TESTMODE)
+    // RAM Instances mapped to external dp_ram ports
     dp_ram #(
         .DATA_WIDTH(32),
         .ADDR_WIDTH(ADDR_WIDTH)
@@ -169,7 +170,7 @@ module ascan #(
         .addr_a (waddr),
         .we_a   (ram_we_0),
         .d_a    (packed_word),
-        .q_a    (), // Unused on write-only port
+        .q_a    (),
 
         .clk_b  (sys_clk),
         .addr_b (raddr),
@@ -186,7 +187,7 @@ module ascan #(
         .addr_a (waddr),
         .we_a   (ram_we_1),
         .d_a    (packed_word),
-        .q_a    (), // Unused on write-only port
+        .q_a    (),
 
         .clk_b  (sys_clk),
         .addr_b (raddr),
@@ -577,6 +578,9 @@ endmodule
 
 // =========================================================================
 // Auxiliary Module: Bit Packer (ascan_packer)
+// Fully compliant with 12-to-32 bit packing specifications:
+// Packs 8 consecutive 12-bit samples into 3 words of 32 bits (96 bits total).
+// Supports frame flushing and zero-padding at the end of the frame.
 // =========================================================================
 
 module ascan_packer (
@@ -591,72 +595,147 @@ module ascan_packer (
     output reg                     o_frame_done
 );
 
-    reg [63:0] bit_buf;
-    reg [5:0]  bit_cnt;
-    reg        flush_active;
-    reg [31:0] flush_buf;
+    // Sample index counter within the 8-sample group (0 to 7)
+    reg [2:0]  sample_cnt;
 
-    // Temporary variables declared at module level for strict compliance
-    reg [63:0] next_bit_buf;
-    reg [5:0]  next_bit_cnt;
+    // Buffer registers to hold preceding samples
+    reg [11:0] s0_reg;
+    reg [11:0] s1_reg;
+    reg [3:0]  hold_s2; // Holds S2[11:8] for W1[3:0]
+    reg [11:0] s3_reg;
+    reg [11:0] s4_reg;
+    reg [7:0]  hold_s5; // Holds S5[11:4] for W2[7:0]
+    reg [11:0] s6_reg;
+
+    // Flushing control registers for handling unaligned frame endings
+    reg        state_flush;
+    reg [31:0] flush_word;
 
     always @(posedge clk) begin
         if (!rst_n) begin
-            bit_buf      <= 64'd0;
-            bit_cnt      <= 6'd0;
+            sample_cnt   <= 3'd0;
+            s0_reg       <= 12'd0;
+            s1_reg       <= 12'd0;
+            hold_s2      <= 4'd0;
+            s3_reg       <= 12'd0;
+            s4_reg       <= 12'd0;
+            hold_s5      <= 8'd0;
+            s6_reg       <= 12'd0;
             o_word       <= 32'd0;
             o_word_vld   <= 1'b0;
             o_frame_done <= 1'b0;
-            flush_active <= 1'b0;
-            flush_buf    <= 32'd0;
-            next_bit_buf  = 64'd0;
-            next_bit_cnt  = 6'd0;
+            state_flush  <= 1'b0;
+            flush_word   <= 32'd0;
         end else begin
             o_word_vld   <= 1'b0;
             o_frame_done <= 1'b0;
 
-            if (i_vld) begin
-                // Append incoming 12-bit sample to current bit position
-                next_bit_buf = bit_buf | ({{52{1'b0}}, i_data} << bit_cnt);
-                next_bit_cnt = bit_cnt + 6'd12;
-
-                if (next_bit_cnt >= 6'd32) begin
-                    o_word       <= next_bit_buf[31:0];
-                    o_word_vld   <= 1'b1;
-                    next_bit_buf = next_bit_buf >> 32;
-                    next_bit_cnt = next_bit_cnt - 6'd32;
-
-                    if (i_last) begin
-                        if (next_bit_cnt > 0) begin
-                            // Extra bits remain, need one extra cycle (flush) to empty them
-                            flush_active <= 1'b1;
-                            flush_buf    <= next_bit_buf[31:0];
-                        end else begin
-                            o_frame_done <= 1'b1;
-                        end
-                    end
-                end else begin
-                    // Less than 32 bits, but frame ended: output zero-padded partial word
-                    if (i_last) begin
-                        o_word       <= next_bit_buf[31:0];
-                        o_word_vld   <= 1'b1;
-                        o_frame_done <= 1'b1;
-                        next_bit_buf = 0;
-                        next_bit_cnt = 0;
-                    end
-                end
-
-                bit_buf <= next_bit_buf;
-                bit_cnt <= next_bit_cnt;
-
-            end else if (flush_active) begin
-                // Flush cycle to write the final leftover word
-                o_word       <= flush_buf;
+            // Delayed flushing cycle for end-of-frame remainder (required when last sample was S2 or S5)
+            if (state_flush) begin
+                state_flush  <= 1'b0;
+                o_word       <= flush_word;
                 o_word_vld   <= 1'b1;
                 o_frame_done <= 1'b1;
-                flush_active <= 1'b0;
-                bit_buf      <= 64'd0;
-                bit_cnt      <= 6'd0;
+            end else if (i_vld) begin
+                case (sample_cnt)
+                    3'd0: begin
+                        s0_reg <= i_data;
+                        if (i_last) begin
+                            o_word       <= {20'd0, i_data}; // W0: S0 only (padded with 20 zeros)
+                            o_word_vld   <= 1'b1;
+                            o_frame_done <= 1'b1;
+                            sample_cnt   <= 3'd0;
+                        end else begin
+                            sample_cnt   <= 3'd1;
+                        end
+                    end
+
+                    3'd1: begin
+                        s1_reg <= i_data;
+                        if (i_last) begin
+                            o_word       <= {8'd0, i_data, s0_reg}; // W0: S1, S0 (padded with 8 zeros)
+                            o_word_vld   <= 1'b1;
+                            o_frame_done <= 1'b1;
+                            sample_cnt   <= 3'd0;
+                        end else begin
+                            sample_cnt   <= 3'd2;
+                        end
+                    end
+
+                    3'd2: begin
+                        hold_s2 <= i_data[11:8];
+                        // Emit W0: [S2[7:0], S1[11:0], S0[11:0]]
+                        o_word     <= {i_data[7:0], s1_reg, s0_reg};
+                        o_word_vld <= 1'b1;
+                        if (i_last) begin
+                            // S2 is the last sample of the frame, need to flush the remaining 4 bits as W1
+                            state_flush <= 1'b1;
+                            flush_word  <= {28'd0, i_data[11:8]}; // W1: S2[11:8] (padded with 28 zeros)
+                            sample_cnt  <= 3'd0;
+                        end else begin
+                            sample_cnt  <= 3'd3;
+                        end
+                    end
+
+                    3'd3: begin
+                        s3_reg <= i_data;
+                        if (i_last) begin
+                            o_word       <= {16'd0, i_data, hold_s2}; // W1: S3, S2[11:8] (padded with 16 zeros)
+                            o_word_vld   <= 1'b1;
+                            o_frame_done <= 1'b1;
+                            sample_cnt   <= 3'd0;
+                        end else begin
+                            sample_cnt   <= 3'd4;
+                        end
+                    end
+
+                    3'd4: begin
+                        s4_reg <= i_data;
+                        if (i_last) begin
+                            o_word       <= {4'd0, i_data, s3_reg, hold_s2}; // W1: S4, S3, S2[11:8] (padded with 4 zeros)
+                            o_word_vld   <= 1'b1;
+                            o_frame_done <= 1'b1;
+                            sample_cnt   <= 3'd0;
+                        end else begin
+                            sample_cnt   <= 3'd5;
+                        end
+                    end
+
+                    3'd5: begin
+                        hold_s5 <= i_data[11:4];
+                        // Emit W1: [S5[3:0], S4[11:0], S3[11:0], S2[11:8]]
+                        o_word     <= {i_data[3:0], s4_reg, s3_reg, hold_s2};
+                        o_word_vld <= 1'b1;
+                        if (i_last) begin
+                            // S5 is the last sample of the frame, need to flush the remaining 8 bits as W2
+                            state_flush <= 1'b1;
+                            flush_word  <= {24'd0, i_data[11:4]}; // W2: S5[11:4] (padded with 24 zeros)
+                            sample_cnt  <= 3'd0;
+                        end else begin
+                            sample_cnt  <= 3'd6;
+                        end
+                    end
+
+                    3'd6: begin
+                        s6_reg <= i_data;
+                        if (i_last) begin
+                            o_word       <= {12'd0, i_data, hold_s5}; // W2: S6, S5[11:4] (padded with 12 zeros)
+                            o_word_vld   <= 1'b1;
+                            o_frame_done <= 1'b1;
+                            sample_cnt   <= 3'd0;
+                        end else begin
+                            sample_cnt   <= 3'd7;
+                        end
+                    end
+
+                    3'd7: begin
+                        // Emit W2: [S7[11:0], S6[11:0], S5[11:4]]
+                        o_word       <= {i_data, s6_reg, hold_s5};
+                        o_word_vld   <= 1'b1;
+                        o_frame_done <= i_last;
+                        sample_cnt   <= 3'd0;
+                    end
+                endcase
             end
         end
     end
