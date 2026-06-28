@@ -77,7 +77,6 @@ module ascan_tb;
     
     integer           num_points;
     integer           expected_words;
-    integer           rem;
     integer           p, j, start_idx, end_idx;
     reg [19:0]        g_sum;
     reg [11:0]        g_max;
@@ -160,12 +159,8 @@ module ascan_tb;
                 endcase
             end
 
-            // 3. Вычисляем ожидаемое количество 32-битных слов на выходе упаковщика
-            expected_words = (num_points / 8) * 3;
-            rem = num_points % 8;
-            if (rem == 1 || rem == 2) expected_words = expected_words + 1;
-            else if (rem >= 3 && rem <= 5) expected_words = expected_words + 2;
-            else if (rem >= 6 && rem <= 7) expected_words = expected_words + 3;
+            // 3. Вычисляем ожидаемое количество 32-битных слов при бесшовной упаковке 12-битных точек
+            expected_words = ((num_points * 12) + 31) / 32;
 
             $display("[TB] ----------------------------------------------------------------");
             $display("[TB] ТЕСТ: Samples=%0d, Accum=%0d, Type=%0d, Skip_ticks=%0d", samples, accum, accum_type, skip);
@@ -209,18 +204,18 @@ module ascan_tb;
             $display("[TB] Распаковка плотного 12-битного потока...");
             
             for (item_idx = 0; item_idx < num_points; item_idx = item_idx + 1) begin
-                // Вычисляем смещение битов в общем потоке
+                // Вычисляем сквозное битовое смещение
                 bit_offset = item_idx * 12;
                 word_idx = bit_offset / 32;
                 bit_offset = bit_offset % 32;
                 
-                // Читаем скользящее 64-битное окно для захвата пересечений границ слов
+                // Читаем скользящее 64-битное окно для бесшовного извлечения пересечений
                 temp_bitstream = {32'd0, rx_frame_buffer[word_idx]};
                 if (bit_offset + 12 > 32) begin
                     temp_bitstream = temp_bitstream | ({32'd0, rx_frame_buffer[word_idx + 1]} << 32);
                 end
                 
-                // Извлекаем LSB-выровненную 12-битную точку
+                // Извлекаем LSB-выровненную 12-битную точку без лишних бит
                 unpacked_val = (temp_bitstream >> bit_offset) & 12'hFFF;
                 
                 if (unpacked_val === expected_array[item_idx]) begin

@@ -167,20 +167,12 @@ module ascan_buffer #(
     // Select source data from active bank
     wire [31:0] rdata = (read_bank == 1'b0) ? rdata_0 : rdata_1;
 
-    // Read FIFO to match AXI-Stream backpressure with 0-bubble performance
-    reg [31:0] fifo_mem [3:0];
-    reg [1:0]  fifo_wptr;
-    reg [1:0]  fifo_rptr;
-    reg [2:0]  fifo_cnt;
-
-    wire       fifo_full = (fifo_cnt == 3'd4);
-    wire       fifo_empty = (fifo_cnt == 3'd0);
-
+    // Control signals for the Output FIFO
     reg        ram_read_en;
-    reg        ram_read_val;
+    wire [2:0] fifo_cnt;
 
     // Track total words currently in flight or inside FIFO
-    wire [3:0] fifo_total = fifo_cnt + ram_read_val + ram_read_en;
+    wire [3:0] fifo_total = fifo_cnt + ram_read_en;
 
     // -------------------------------------------------------------------------
     // CDC Synchronization Instantiations
@@ -313,10 +305,8 @@ module ascan_buffer #(
             o_out_size       <= 16'd0;
             o_data_ready     <= 1'b0;
             ram_read_en      <= 1'b0;
-            ram_read_val     <= 1'b0;
         end else begin
             ram_read_en  <= 1'b0;
-            ram_read_val <= ram_read_en;
 
             case (read_state)
                 R_IDLE: begin
@@ -383,34 +373,68 @@ module ascan_buffer #(
     end
 
     // -------------------------------------------------------------------------
-    // Output Stream FIFO (0-bubble performance with backpressure support)
+    // Instantiation of the Output Stream FIFO Module
     // -------------------------------------------------------------------------
-    wire fifo_push = ram_read_val;
-    wire fifo_pop  = o_out_vld && i_out_rdy;
+    ascan_fifo u_out_fifo (
+        .clk    (sys_clk),
+        .rst_n  (sys_rst_n),
+        .i_data (rdata),
+        .i_push (ram_read_en),
+        .o_data (o_out_data),
+        .o_vld  (o_out_vld),
+        .i_rdy  (i_out_rdy),
+        .o_cnt  (fifo_cnt)
+    );
 
-    always @(posedge sys_clk) begin
-        if (!sys_rst_n) begin
+endmodule
+
+
+// =========================================================================
+// Auxiliary Module: Synchronous Output Stream FIFO (ascan_fifo)
+// Provides 0-bubble throughput with backpressure support (Skid-buffer style).
+// =========================================================================
+
+module ascan_fifo (
+    input  wire        clk,
+    input  wire        rst_n,
+    input  wire [31:0] i_data,
+    input  wire        i_push,
+    output wire [31:0] o_data,
+    output wire        o_vld,
+    input  wire        i_rdy,
+    output reg  [2:0]  o_cnt
+);
+
+    reg [31:0] fifo_mem [3:0];
+    reg [1:0]  fifo_wptr;
+    reg [1:0]  fifo_rptr;
+
+    wire       fifo_empty = (o_cnt == 3'd0);
+    wire       fifo_pop   = o_vld && i_rdy;
+
+    assign o_vld  = !fifo_empty;
+    assign o_data = fifo_mem[fifo_rptr];
+
+    always @(posedge clk) begin
+        if (!rst_n) begin
             fifo_wptr <= 2'd0;
             fifo_rptr <= 2'd0;
-            fifo_cnt  <= 3'd0;
+            o_cnt     <= 3'd0;
         end else begin
-            if (fifo_push && !fifo_pop) begin
-                fifo_mem[fifo_wptr] <= rdata;
+            if (i_push && !fifo_pop) begin
+                fifo_mem[fifo_wptr] <= i_data;
                 fifo_wptr           <= fifo_wptr + 1'b1;
-                fifo_cnt            <= fifo_cnt + 1'b1;
-            end else if (!fifo_push && fifo_pop) begin
+                o_cnt               <= o_cnt + 1'b1;
+            end else if (!i_push && fifo_pop) begin
                 fifo_rptr           <= fifo_rptr + 1'b1;
-                fifo_cnt            <= fifo_cnt - 1'b1;
-            end else if (fifo_push && fifo_pop) begin
-                fifo_mem[fifo_wptr] <= rdata;
+                o_cnt               <= o_cnt - 1'b1;
+            end else if (i_push && fifo_pop) begin
+                fifo_mem[fifo_wptr] <= i_data;
                 fifo_wptr           <= fifo_wptr + 1'b1;
                 fifo_rptr           <= fifo_rptr + 1'b1;
             end
         end
     end
-
-    assign o_out_vld  = !fifo_empty;
-    assign o_out_data = fifo_mem[fifo_rptr];
 
 endmodule
 
@@ -504,6 +528,41 @@ module ascan_accum (
     wire is_last_of_group = (accum_cnt == r_accum - 1'b1) || (sample_cnt == r_n_samples - 1'b1);
     wire is_last_of_frame = (sample_cnt == r_n_samples - 1'b1);
 
+    // Combinational ahead-of-time completion signals
+    reg group_done_next;
+    reg group_last_next;
+    
+    always @(*) begin
+        group_done_next = 1'b0;
+        group_last_next = 1'b0;
+        if (state == S_IDLE) begin
+            if (sync_reg && (r_skip_ticks == 16'd0)) begin
+                if ((r_accum == 8'd1) || (r_n_samples == 16'd1)) begin
+                    group_done_next = 1'b1;
+                    if (r_n_samples == 16'd1) begin
+                        group_last_next = 1'b1;
+                    end
+                end
+            end
+        end else if (state == S_SKIP) begin
+            if (skip_cnt == 16'd0) begin
+                if ((r_accum == 8'd1) || (r_n_samples == 16'd1)) begin
+                    group_done_next = 1'b1;
+                    if (r_n_samples == 16'd1) begin
+                        group_last_next = 1'b1;
+                    end
+                end
+            end
+        end else if (state == S_CAPTURE) begin
+            if (is_last_of_group) begin
+                group_done_next = 1'b1;
+                if (is_last_of_frame) begin
+                    group_last_next = 1'b1;
+                end
+            end
+        end
+    end
+
     always @(posedge clk) begin
         if (!rst_n) begin
             state          <= S_IDLE;
@@ -516,8 +575,8 @@ module ascan_accum (
             group_done_raw <= 1'b0;
             group_last_raw <= 1'b0;
         end else begin
-            group_done_raw <= 1'b0;
-            group_last_raw <= 1'b0;
+            group_done_raw <= group_done_next;
+            group_last_raw <= group_last_next;
 
             case (state)
                 S_IDLE: begin
@@ -531,10 +590,8 @@ module ascan_accum (
                             accum_cnt  <= 8'd1;
 
                             if ((r_accum == 8'd1) || (r_n_samples == 16'd1)) begin
-                                group_done_raw <= 1'b1;
                                 accum_cnt      <= 8'd0;
                                 if (r_n_samples == 16'd1) begin
-                                    group_last_raw <= 1'b1;
                                     state          <= S_IDLE;
                                 end else begin
                                     state          <= S_CAPTURE;
@@ -562,10 +619,8 @@ module ascan_accum (
                         accum_cnt  <= 8'd1;
 
                         if ((r_accum == 8'd1) || (r_n_samples == 16'd1)) begin
-                            group_done_raw <= 1'b1;
                             accum_cnt      <= 8'd0;
                             if (r_n_samples == 16'd1) begin
-                                group_last_raw <= 1'b1;
                                 state          <= S_IDLE;
                             end else begin
                                 state          <= S_CAPTURE;
@@ -593,10 +648,8 @@ module ascan_accum (
                     accum_cnt  <= accum_cnt + 1'b1;
 
                     if (is_last_of_group) begin
-                        group_done_raw <= 1'b1;
                         accum_cnt      <= 8'd0;
                         if (is_last_of_frame) begin
-                            group_last_raw <= 1'b1;
                             state          <= S_IDLE;
                         end
                     end
@@ -620,22 +673,27 @@ module ascan_accum (
     // Robust decimation lookahead fix: select abs_data on start-of-group cycle, else use registered dec_reg
     wire [11:0] comb_dec = (accum_cnt == 8'd0) ? abs_data : dec_reg;
 
+    reg [11:0] comb_out;
+    always @(*) begin
+        case (r_accum_type)
+            2'b00:   comb_out = comb_max;
+            2'b01:   comb_out = comb_sum[19:0] / divisor;
+            2'b10:   comb_out = comb_dec;
+            default: comb_out = comb_dec;
+        endcase
+    end
+
     always @(posedge clk) begin
         if (!rst_n) begin
             o_vld  <= 1'b0;
             o_last <= 1'b0;
             o_data <= 12'd0;
         end else begin
-            o_vld  <= group_done_raw;
-            o_last <= group_last_raw;
+            o_vld  <= group_done_next;
+            o_last <= group_last_next;
 
-            if (group_done_raw) begin
-                case (r_accum_type)
-                    2'b00:   o_data <= comb_max;                 // Peak Detector
-                    2'b01:   o_data <= comb_sum[19:0] / divisor; // Integrator (Average)
-                    2'b10:   o_data <= comb_dec;                 // Decimation
-                    default: o_data <= comb_dec;
-                endcase
+            if (group_done_next) begin
+                o_data <= comb_out;
             end
         end
     end
