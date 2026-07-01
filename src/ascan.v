@@ -1,5 +1,6 @@
 // =========================================================================
 // Global Project Module: ascan (A-Scan Processor & Buffer)
+// Fully compliant with multi-capture sub-trigger specifications.
 // =========================================================================
 
 `default_nettype none
@@ -10,10 +11,13 @@ module ascan #(
     // ADC clock domain (65 MHz)
     input  wire                    adc_clk,
     input  wire                    adc_rst_n,
-    input  wire                    i_adc_sync,
+    input  wire                    i_adc_sync, // Global start of the entire scan frame
+    input  wire                    i_sub_sync, // Trigger start of subsequent sub-run step
+    input  wire                    i_sub_last, // Indicator that current step is the last in sequence
+    output wire                    o_sub_done, // Ready status level of current step
     input  wire signed [11:0]      i_adc_data,
 
-    // Configuration parameters (captured on i_adc_sync)
+    // Configuration parameters (captured on triggers)
     input  wire [15:0]             i_n_samples,
     input  wire [7:0]              i_accum,
     input  wire [1:0]              i_accum_type,
@@ -27,7 +31,11 @@ module ascan #(
     output wire [31:0]             o_out_data,
     output wire                    o_out_vld,
     input  wire                    i_out_rdy,
-    output wire [15:0]             o_out_size,
+    output wire [15:0]             o_out_size0, // Size of first sub-run step in words
+    output wire [15:0]             o_out_size1, // Size of second sub-run step in words
+    output wire [15:0]             o_out_size2, // Size of third sub-run step in words
+    output wire [15:0]             o_out_size3, // Size of fourth sub-run step in words
+    output wire [15:0]             o_out_size,  // Sum total size of all active steps
     output wire                    o_data_ready
 );
 
@@ -51,7 +59,7 @@ module ascan #(
     ascan_accum u_accum (
         .clk          (adc_clk),
         .rst_n        (adc_rst_n),
-        .i_sync       (i_adc_sync),
+        .i_sync       (i_adc_sync | i_sub_sync), // Trigger on any capture start pulse
         .i_data       (i_adc_data),
         .i_n_samples  (i_n_samples),
         .i_accum      (i_accum),
@@ -85,6 +93,10 @@ module ascan #(
         // ADC Clock Domain
         .adc_clk             (adc_clk),
         .adc_rst_n           (adc_rst_n),
+        .i_adc_sync          (i_adc_sync),
+        .i_sub_sync          (i_sub_sync),
+        .i_sub_last          (i_sub_last),
+        .o_sub_done          (o_sub_done),
         .i_packed_word       (packed_word),
         .i_packed_word_vld   (packed_word_vld),
         .i_packed_frame_done (packed_frame_done),
@@ -95,6 +107,10 @@ module ascan #(
         .o_out_data          (o_out_data),
         .o_out_vld           (o_out_vld),
         .i_out_rdy           (i_out_rdy),
+        .o_out_size0         (o_out_size0),
+        .o_out_size1         (o_out_size1),
+        .o_out_size2         (o_out_size2),
+        .o_out_size3         (o_out_size3),
         .o_out_size          (o_out_size),
         .o_data_ready        (o_data_ready)
     );
@@ -112,6 +128,10 @@ module ascan_buffer #(
     // ADC clock domain
     input  wire                    adc_clk,
     input  wire                    adc_rst_n,
+    input  wire                    i_adc_sync,
+    input  wire                    i_sub_sync,
+    input  wire                    i_sub_last,
+    output reg                     o_sub_done,
     input  wire [31:0]             i_packed_word,
     input  wire                    i_packed_word_vld,
     input  wire                    i_packed_frame_done,
@@ -122,6 +142,10 @@ module ascan_buffer #(
     output wire [31:0]             o_out_data,
     output wire                    o_out_vld,
     input  wire                    i_out_rdy,
+    output reg  [15:0]             o_out_size0,
+    output reg  [15:0]             o_out_size1,
+    output reg  [15:0]             o_out_size2,
+    output reg  [15:0]             o_out_size3,
     output reg  [15:0]             o_out_size,
     output reg                     o_data_ready
 );
@@ -129,10 +153,19 @@ module ascan_buffer #(
     // Bank management registers (adc_clk domain)
     reg                    write_bank;     // 0 or 1
     reg [ADDR_WIDTH-1:0]   waddr;          // Write address pointer
-    reg [15:0]             frame_size_0;   // Captured size of Bank 0
-    reg [15:0]             frame_size_1;   // Captured size of Bank 1
     reg                    bank_0_avail;   // Bank 0 contains complete valid frame
     reg                    bank_1_avail;   // Bank 1 contains complete valid frame
+
+    // Registers to track size and bounds of up to 4 consecutive sub-runs
+    reg [1:0]              sub_run_cnt;
+    reg                    r_sub_last;
+
+    reg [ADDR_WIDTH-1:0]   start_addr_1;
+    reg [ADDR_WIDTH-1:0]   start_addr_2;
+    reg [ADDR_WIDTH-1:0]   start_addr_3;
+
+    reg [15:0]             frame_size_0_b0, frame_size_1_b0, frame_size_2_b0, frame_size_3_b0;
+    reg [15:0]             frame_size_0_b1, frame_size_1_b1, frame_size_2_b1, frame_size_3_b1;
 
     // Synchronized clear flags (adc_clk domain)
     wire                   bank_0_clear_adc;
@@ -249,16 +282,25 @@ module ascan_buffer #(
     );
 
     // -------------------------------------------------------------------------
-    // Buffer Writing Control Logic (adc_clk domain)
+    // Buffer Writing Control Logic with Multi-capture support (adc_clk domain)
     // -------------------------------------------------------------------------
+    wire [ADDR_WIDTH-1:0] w_end_addr = waddr + (i_packed_word_vld ? 1'b1 : 1'b0);
+
     always @(posedge adc_clk) begin
         if (!adc_rst_n) begin
-            waddr        <= 0;
-            write_bank   <= 1'b0;
-            bank_0_avail <= 1'b0;
-            bank_1_avail <= 1'b0;
-            frame_size_0 <= 16'd0;
-            frame_size_1 <= 16'd0;
+            waddr           <= 0;
+            write_bank      <= 1'b0;
+            bank_0_avail    <= 1'b0;
+            bank_1_avail    <= 1'b0;
+            sub_run_cnt     <= 2'd0;
+            r_sub_last      <= 1'b0;
+            o_sub_done      <= 1'b0;
+            start_addr_1    <= 0;
+            start_addr_2    <= 0;
+            start_addr_3    <= 0;
+            
+            frame_size_0_b0 <= 0; frame_size_1_b0 <= 0; frame_size_2_b0 <= 0; frame_size_3_b0 <= 0;
+            frame_size_0_b1 <= 0; frame_size_1_b1 <= 0; frame_size_2_b1 <= 0; frame_size_3_b1 <= 0;
         end else begin
             // Lower availability flag once sys_clk domain finished reading and cleared it
             if (bank_0_clear_adc) begin
@@ -268,23 +310,73 @@ module ascan_buffer #(
                 bank_1_avail <= 1'b0;
             end
 
+            if (i_adc_sync) begin
+                waddr           <= 0;
+                sub_run_cnt     <= 2'd0;
+                r_sub_last      <= i_sub_last;
+                o_sub_done      <= 1'b0;
+                start_addr_1    <= 0;
+                start_addr_2    <= 0;
+                start_addr_3    <= 0;
+                if (write_bank == 1'b0) begin
+                    frame_size_0_b0 <= 0; frame_size_1_b0 <= 0; frame_size_2_b0 <= 0; frame_size_3_b0 <= 0;
+                end else begin
+                    frame_size_0_b1 <= 0; frame_size_1_b1 <= 0; frame_size_2_b1 <= 0; frame_size_3_b1 <= 0;
+                end
+            end else if (i_sub_sync) begin
+                sub_run_cnt     <= sub_run_cnt + 1'b1;
+                r_sub_last      <= i_sub_last;
+                o_sub_done      <= 1'b0;
+            end
+
             // Increment write address on new word
             if (i_packed_word_vld) begin
                 waddr <= waddr + 1'b1;
             end
 
-            // Complete frame written, commit size and switch bank
+            // Complete current sub-run, write size register & assert o_sub_done
             if (i_packed_frame_done) begin
+                o_sub_done <= 1'b1;
+                
                 if (write_bank == 1'b0) begin
-                    frame_size_0 <= waddr + (i_packed_word_vld ? 1'b1 : 1'b0);
-                    bank_0_avail <= 1'b1;
-                    write_bank   <= 1'b1;
+                    if (sub_run_cnt == 2'd0) begin
+                        frame_size_0_b0 <= w_end_addr;
+                        start_addr_1    <= w_end_addr;
+                    end else if (sub_run_cnt == 2'd1) begin
+                        frame_size_1_b0 <= w_end_addr - start_addr_1;
+                        start_addr_2    <= w_end_addr;
+                    end else if (sub_run_cnt == 2'd2) begin
+                        frame_size_2_b0 <= w_end_addr - start_addr_2;
+                        start_addr_3    <= w_end_addr;
+                    end else if (sub_run_cnt == 2'd3) begin
+                        frame_size_3_b0 <= w_end_addr - start_addr_3;
+                    end
                 end else begin
-                    frame_size_1 <= waddr + (i_packed_word_vld ? 1'b1 : 1'b0);
-                    bank_1_avail <= 1'b1;
-                    write_bank   <= 1'b0;
+                    if (sub_run_cnt == 2'd0) begin
+                        frame_size_0_b1 <= w_end_addr;
+                        start_addr_1    <= w_end_addr;
+                    end else if (sub_run_cnt == 2'd1) begin
+                        frame_size_1_b1 <= w_end_addr - start_addr_1;
+                        start_addr_2    <= w_end_addr;
+                    end else if (sub_run_cnt == 2'd2) begin
+                        frame_size_2_b1 <= w_end_addr - start_addr_2;
+                        start_addr_3    <= w_end_addr;
+                    end else if (sub_run_cnt == 2'd3) begin
+                        frame_size_3_b1 <= w_end_addr - start_addr_3;
+                    end
                 end
-                waddr <= 0;
+
+                // If this is the last sub-run of the scan frame, commit bank and reset pointer
+                if (r_sub_last) begin
+                    if (write_bank == 1'b0) begin
+                        bank_0_avail <= 1'b1;
+                        write_bank   <= 1'b1;
+                    end else begin
+                        bank_1_avail <= 1'b1;
+                        write_bank   <= 1'b0;
+                    end
+                    waddr <= 0;
+                end
             end
         end
     end
@@ -302,6 +394,10 @@ module ascan_buffer #(
             pop_cnt          <= 0;
             bank_0_clear_sys <= 1'b0;
             bank_1_clear_sys <= 1'b0;
+            o_out_size0      <= 16'd0;
+            o_out_size1      <= 16'd0;
+            o_out_size2      <= 16'd0;
+            o_out_size3      <= 16'd0;
             o_out_size       <= 16'd0;
             o_data_ready     <= 1'b0;
             ram_read_en      <= 1'b0;
@@ -313,8 +409,12 @@ module ascan_buffer #(
                     o_data_ready <= 1'b0;
                     if (bank_0_avail_sys && !bank_0_clear_sys) begin
                         read_bank    <= 1'b0;
-                        read_size    <= frame_size_0;
-                        o_out_size   <= frame_size_0;
+                        read_size    <= frame_size_0_b0 + frame_size_1_b0 + frame_size_2_b0 + frame_size_3_b0;
+                        o_out_size0  <= frame_size_0_b0;
+                        o_out_size1  <= frame_size_1_b0;
+                        o_out_size2  <= frame_size_2_b0;
+                        o_out_size3  <= frame_size_3_b0;
+                        o_out_size   <= frame_size_0_b0 + frame_size_1_b0 + frame_size_2_b0 + frame_size_3_b0;
                         o_data_ready <= 1'b1;
                         raddr_reg    <= 0;
                         raddr_cnt    <= 0;
@@ -322,8 +422,12 @@ module ascan_buffer #(
                         read_state   <= R_READ;
                     end else if (bank_1_avail_sys && !bank_1_clear_sys) begin
                         read_bank    <= 1'b1;
-                        read_size    <= frame_size_1;
-                        o_out_size   <= frame_size_1;
+                        read_size    <= frame_size_0_b1 + frame_size_1_b1 + frame_size_2_b1 + frame_size_3_b1;
+                        o_out_size0  <= frame_size_0_b1;
+                        o_out_size1  <= frame_size_1_b1;
+                        o_out_size2  <= frame_size_2_b1;
+                        o_out_size3  <= frame_size_3_b1;
+                        o_out_size   <= frame_size_0_b1 + frame_size_1_b1 + frame_size_2_b1 + frame_size_3_b1;
                         o_data_ready <= 1'b1;
                         raddr_reg    <= 0;
                         raddr_cnt    <= 0;
