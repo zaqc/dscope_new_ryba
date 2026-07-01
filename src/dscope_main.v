@@ -148,52 +148,13 @@ module dscope_main #(
     output wire [9:0]              o_sys_tune_log_offset,
 
     // -------------------------------------------------------------------------
-    // Parallel Readout Stream Interfaces (sys_clk domain)
+    // Joint Readout Stream Interface (sys_clk domain)
     // -------------------------------------------------------------------------
-    
-    // Channel 0 Readout Stream Port
-    output wire [31:0]             o_ch0_out_data,
-    output wire                    o_ch0_out_vld,
-    input  wire                    i_ch0_out_rdy,
-    output wire [15:0]             o_ch0_out_size0,
-    output wire [15:0]             o_ch0_out_size1,
-    output wire [15:0]             o_ch0_out_size2,
-    output wire [15:0]             o_ch0_out_size3,
-    output wire [15:0]             o_ch0_out_size,
-    output wire                    o_ch0_data_ready,
-
-    // Channel 1 Readout Stream Port
-    output wire [31:0]             o_ch1_out_data,
-    output wire                    o_ch1_out_vld,
-    input  wire                    i_ch1_out_rdy,
-    output wire [15:0]             o_ch1_out_size0,
-    output wire [15:0]             o_ch1_out_size1,
-    output wire [15:0]             o_ch1_out_size2,
-    output wire [15:0]             o_ch1_out_size3,
-    output wire [15:0]             o_ch1_out_size,
-    output wire                    o_ch1_data_ready,
-
-    // Channel 2 Readout Stream Port
-    output wire [31:0]             o_ch2_out_data,
-    output wire                    o_ch2_out_vld,
-    input  wire                    i_ch2_out_rdy,
-    output wire [15:0]             o_ch2_out_size0,
-    output wire [15:0]             o_ch2_out_size1,
-    output wire [15:0]             o_ch2_out_size2,
-    output wire [15:0]             o_ch2_out_size3,
-    output wire [15:0]             o_ch2_out_size,
-    output wire                    o_ch2_data_ready,
-
-    // Channel 3 Readout Stream Port
-    output wire [31:0]             o_ch3_out_data,
-    output wire                    o_ch3_out_vld,
-    input  wire                    i_ch3_out_rdy,
-    output wire [15:0]             o_ch3_out_size0,
-    output wire [15:0]             o_ch3_out_size1,
-    output wire [15:0]             o_ch3_out_size2,
-    output wire [15:0]             o_ch3_out_size3,
-    output wire [15:0]             o_ch3_out_size,
-    output wire                    o_ch3_data_ready,
+    output wire [31:0]             o_out_data,   // Merged packet stream data
+    output wire                    o_out_vld,    // Merged packet validity
+    input  wire                    i_out_rdy,    // Downstream backpressure readiness
+    output wire [15:0]             o_out_size,   // Total package size (8 words header + active payload)
+    output wire                    o_data_ready, // High when complete 4-channel butterfly buffer is ready for readout
 
     // General Sequencer Status
     output wire                    o_seq_busy
@@ -424,7 +385,7 @@ module dscope_main #(
     );
 
     // =========================================================================
-    // 3. 4-Channel Receiver Concentrator Instantiation (ascan_hub)
+    // 4. 4-Channel Receiver Concentrator Instantiation (ascan_hub)
     // =========================================================================
     ascan_hub #(
         .ADDR_WIDTH          (ASCAN_ADDR_WIDTH)
@@ -468,46 +429,12 @@ module dscope_main #(
         .i_ascan_ch3_accum_type (w_ascan_ch3_accum_type),
         .i_ascan_ch3_skip_ticks (w_ascan_ch3_drop_ticks),
 
-        // Readout Streaming Busses
-        .o_ch0_out_data      (o_ch0_out_data),
-        .o_ch0_out_vld       (o_ch0_out_vld),
-        .i_ch0_out_rdy       (i_ch0_out_rdy),
-        .o_ch0_out_size0     (o_ch0_out_size0),
-        .o_ch0_out_size1     (o_ch0_out_size1),
-        .o_ch0_out_size2     (o_ch0_out_size2),
-        .o_ch0_out_size3     (o_ch0_out_size3),
-        .o_ch0_out_size      (o_ch0_out_size),
-        .o_ch0_data_ready    (o_ch0_data_ready),
-
-        .o_ch1_out_data      (o_ch1_out_data),
-        .o_ch1_out_vld       (o_ch1_out_vld),
-        .i_ch1_out_rdy       (i_ch1_out_rdy),
-        .o_ch1_out_size0     (o_ch1_out_size0),
-        .o_ch1_out_size1     (o_ch1_out_size1),
-        .o_ch1_out_size2     (o_ch1_out_size2),
-        .o_ch1_out_size3     (o_ch1_out_size3),
-        .o_ch1_out_size      (o_ch1_out_size),
-        .o_ch1_data_ready    (o_ch1_data_ready),
-
-        .o_ch2_out_data      (o_ch2_out_data),
-        .o_ch2_out_vld       (o_ch2_out_vld),
-        .i_ch2_out_rdy       (i_ch2_out_rdy),
-        .o_ch2_out_size0     (o_ch2_out_size0),
-        .o_ch2_out_size1     (o_ch2_out_size1),
-        .o_ch2_out_size2     (o_ch2_out_size2),
-        .o_ch2_out_size3     (o_ch2_out_size3),
-        .o_ch2_out_size      (o_ch2_out_size),
-        .o_ch2_data_ready    (o_ch2_data_ready),
-
-        .o_ch3_out_data      (o_ch3_out_data),
-        .o_ch3_out_vld       (o_ch3_out_vld),
-        .i_ch3_out_rdy       (i_ch3_out_rdy),
-        .o_ch3_out_size0     (o_ch3_out_size0),
-        .o_ch3_out_size1     (o_ch3_out_size1),
-        .o_ch3_out_size2     (o_ch3_out_size2),
-        .o_ch3_out_size3     (o_ch3_out_size3),
-        .o_ch3_out_size      (o_ch3_out_size),
-        .o_ch3_data_ready    (o_ch3_data_ready)
+        // Merged Readout Streaming Interface
+        .o_out_data          (o_out_data),
+        .o_out_vld           (o_out_vld),
+        .i_out_rdy           (i_out_rdy),
+        .o_out_size          (o_out_size),
+        .o_data_ready        (o_data_ready)
     );
 
 endmodule
