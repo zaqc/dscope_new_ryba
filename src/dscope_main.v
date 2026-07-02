@@ -3,8 +3,9 @@
 // Description: Integrates centralized reset/sync generation, the central
 //              sequencer, parametric configuration register space (param),
 //              4-channel parallel capture pipelines (ascan_hub),
-//              and 4-channel real-time VRC/TGC curve calculators (tune)
-//              with dedicated SPI DAC interfaces.
+//              real-time VRC/TGC curve calculators (tune) with SPI DACs,
+//              and a downstream packetizer (data_packet) for prepending
+//              system headers.
 // =========================================================================
 
 `default_nettype none
@@ -129,11 +130,13 @@ module dscope_main #(
     // -------------------------------------------------------------------------
     // Joint Readout Stream Interface (sys_clk domain)
     // -------------------------------------------------------------------------
-    output wire [31:0]             o_out_data,   // Merged packet stream data
-    output wire                    o_out_vld,    // Merged packet validity
-    input  wire                    i_out_rdy,    // Downstream backpressure readiness
-    output wire [15:0]             o_out_size,   // Total package size (8 words header + active payload)
-    output wire                    o_data_ready, // High when complete 4-channel butterfly buffer is ready for readout
+    input  wire [31:0]             i_sys_flags,    // System flags for packet header
+    output wire [31:0]             o_out_data,     // Merged packet stream data (Header + Payload)
+    output wire                    o_out_vld,      // Merged packet validity
+    input  wire                    i_out_rdy,      // Downstream backpressure readiness
+    output wire [15:0]             o_out_size,     // Total packet size in 32-bit words
+    output wire                    o_packet_start, // 1-cycle pulse signaling start of frame
+    output wire                    o_data_ready,   // High when complete 4-channel butterfly buffer is ready for readout
 
     // General Sequencer Status
     output wire                    o_seq_busy
@@ -188,6 +191,16 @@ module dscope_main #(
     wire [9:0]  w_dac_two_code     [0:3];
     wire [9:0]  w_dac_offset_code  [0:3];
     wire        w_dac_data_vld     [0:3];
+
+    // Hub readout stream connections before formatting
+    wire [31:0] w_hub_data;
+    wire        w_hub_vld;
+    wire        w_hub_rdy;
+    wire [15:0] w_hub_size;
+    wire        w_hub_ready;
+
+    // Direct assignment of buffer status signal to top boundary
+    assign o_data_ready = w_hub_ready;
 
     // =========================================================================
     // 1. Central Reset and Sync Generator Instantiation (rst_sync)
@@ -438,12 +451,12 @@ module dscope_main #(
         .i_ascan_ch3_accum_type (w_ascan_ch3_accum_type),
         .i_ascan_ch3_skip_ticks (w_ascan_ch3_drop_ticks),
 
-        // Merged Readout Streaming Interface
-        .o_out_data          (o_out_data),
-        .o_out_vld           (o_out_vld),
-        .i_out_rdy           (i_out_rdy),
-        .o_out_size          (o_out_size),
-        .o_data_ready        (o_data_ready)
+        // Internal Output Streaming Interface (Routes into data_packet)
+        .o_out_data          (w_hub_data),
+        .o_out_vld           (w_hub_vld),
+        .i_out_rdy           (w_hub_rdy),
+        .o_out_size          (w_hub_size),
+        .o_data_ready        (w_hub_ready)
     );
 
     // =========================================================================
@@ -561,6 +574,31 @@ module dscope_main #(
             );
         end
     endgenerate
+
+    // =========================================================================
+    // 6. Data Packetizer (Prepends System Header to Frame Stream)
+    // =========================================================================
+    data_packet u_data_packet (
+        .sys_clk        (sys_clk),
+        .sys_rst_n      (o_sys_rst_n),
+        
+        // System status flags
+        .i_sys_flags    (i_sys_flags),
+        
+        // Stream interface from ascan_hub
+        .i_hub_data     (w_hub_data),
+        .i_hub_vld      (w_hub_vld),
+        .o_hub_rdy      (w_hub_rdy),
+        .i_hub_size     (w_hub_size),
+        .i_hub_ready    (w_hub_ready),
+        
+        // Output packet stream (Connected directly to top-level outputs)
+        .o_packet_data  (o_out_data),
+        .o_packet_vld   (o_out_vld),
+        .i_packet_rdy   (i_out_rdy),
+        .o_packet_len   (o_out_size),
+        .o_packet_start (o_packet_start)
+    );
 
 endmodule
 
