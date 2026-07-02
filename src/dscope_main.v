@@ -2,7 +2,9 @@
 // Global Project Module: dscope_main (Top-Level Controller)
 // Description: Integrates centralized reset/sync generation, the central
 //              sequencer, parametric configuration register space (param),
-//              and 4-channel parallel capture pipelines (ascan_hub).
+//              4-channel parallel capture pipelines (ascan_hub),
+//              and 4-channel real-time VRC/TGC curve calculators (tune)
+//              with dedicated SPI DAC interfaces.
 // =========================================================================
 
 `default_nettype none
@@ -75,43 +77,19 @@ module dscope_main #(
     output wire [3:0]              o_pulse_ch3_gen_mask,
 
     // -------------------------------------------------------------------------
-    // Physical Analog Gain Tuning (VRC/VGA) Outputs (sys_clk domain)
+    // Physical DAC SPI Interfaces (dac_clk domain)
     // -------------------------------------------------------------------------
-    output wire [10:0]             o_tune_ch0_start_amp,
-    output wire [31:0]             o_tune_ch0_amp_one,
-    output wire [31:0]             o_tune_ch0_amp_two,
-    output wire [15:0]             o_tune_ch0_vrc_len,
-    output wire [9:0]              o_tune_ch0_dac_min,
-    output wire [9:0]              o_tune_ch0_dac_max,
-    output wire [1:0]              o_tune_ch0_tune_mode,
-    output wire [9:0]              o_tune_ch0_log_offset,
+    output wire [3:0]              o_dac_one_sclk,      // SPI SCLK for VGA Stage-1 DACs
+    output wire [3:0]              o_dac_one_din,       // SPI DIN for VGA Stage-1 DACs
+    output wire [3:0]              o_dac_one_sync_n,    // SPI CS_N for VGA Stage-1 DACs
 
-    output wire [10:0]             o_tune_ch1_start_amp,
-    output wire [31:0]             o_tune_ch1_amp_one,
-    output wire [31:0]             o_tune_ch1_amp_two,
-    output wire [15:0]             o_tune_ch1_vrc_len,
-    output wire [9:0]              o_tune_ch1_dac_min,
-    output wire [9:0]              o_tune_ch1_dac_max,
-    output wire [1:0]              o_tune_ch1_tune_mode,
-    output wire [9:0]              o_tune_ch1_log_offset,
+    output wire [3:0]              o_dac_two_sclk,      // SPI SCLK for VGA Stage-2 DACs
+    output wire [3:0]              o_dac_two_din,       // SPI DIN for VGA Stage-2 DACs
+    output wire [3:0]              o_dac_two_sync_n,    // SPI CS_N for VGA Stage-2 DACs
 
-    output wire [10:0]             o_tune_ch2_start_amp,
-    output wire [31:0]             o_tune_ch2_amp_one,
-    output wire [31:0]             o_tune_ch2_amp_two,
-    output wire [15:0]             o_tune_ch2_vrc_len,
-    output wire [9:0]              o_tune_ch2_dac_min,
-    output wire [9:0]              o_tune_ch2_dac_max,
-    output wire [1:0]              o_tune_ch2_tune_mode,
-    output wire [9:0]              o_tune_ch2_log_offset,
-
-    output wire [10:0]             o_tune_ch3_start_amp,
-    output wire [31:0]             o_tune_ch3_amp_one,
-    output wire [31:0]             o_tune_ch3_amp_two,
-    output wire [15:0]             o_tune_ch3_vrc_len,
-    output wire [9:0]              o_tune_ch3_dac_min,
-    output wire [9:0]              o_tune_ch3_dac_max,
-    output wire [1:0]              o_tune_ch3_tune_mode,
-    output wire [9:0]              o_tune_ch3_log_offset,
+    output wire [3:0]              o_dac_offset_sclk,   // SPI SCLK for Log Offset DACs
+    output wire [3:0]              o_dac_offset_din,    // SPI DIN for Log Offset DACs
+    output wire [3:0]              o_dac_offset_sync_n, // SPI CS_N for Log Offset DACs
 
     // -------------------------------------------------------------------------
     // Physical PEP (Transducer Multiplexer) Controls (sys_clk domain)
@@ -139,6 +117,7 @@ module dscope_main #(
     output wire [3:0]              o_sys_pulse_gen_mask,
 
     output wire [10:0]             o_sys_tune_start_amp,
+    output wire [15:0]             o_sys_tune_drop_ticks,
     output wire [31:0]             o_sys_tune_amp_one,
     output wire [31:0]             o_sys_tune_amp_two,
     output wire [15:0]             o_sys_tune_vrc_len,
@@ -166,8 +145,11 @@ module dscope_main #(
     wire [1:0] w_step_index;
     wire [3:0] w_adc_chan_ready;
 
+    // Sub-sync trigger lines per clock domain
     wire       w_adc_sub_sync;
     wire       w_adc_sub_last;
+    wire       w_dac_sub_sync;
+    wire       w_hi_sub_sync;
 
     // Ascan parameters routed from param to ascan_hub (captured on i_adc_sync)
     wire [15:0] w_ascan_ch0_n_samples;
@@ -189,6 +171,23 @@ module dscope_main #(
     wire [7:0]  w_ascan_ch3_accum;
     wire [1:0]  w_ascan_ch3_accum_type;
     wire [15:0] w_ascan_ch3_drop_ticks;
+
+    // Internal arrays for VGA/VRC parameters (dac_clk domain)
+    wire [10:0] w_tune_start_amp   [0:3];
+    wire [15:0] w_tune_drop_ticks  [0:3];
+    wire [31:0] w_tune_amp_one     [0:3];
+    wire [31:0] w_tune_amp_two     [0:3];
+    wire [15:0] w_tune_vrc_len     [0:3];
+    wire [9:0]  w_tune_dac_min     [0:3];
+    wire [9:0]  w_tune_dac_max     [0:3];
+    wire [1:0]  w_tune_tune_mode   [0:3];
+    wire [9:0]  w_tune_log_offset  [0:3];
+
+    // Real-time calculated DAC codes (dac_clk domain)
+    wire [9:0]  w_dac_one_code     [0:3];
+    wire [9:0]  w_dac_two_code     [0:3];
+    wire [9:0]  w_dac_offset_code  [0:3];
+    wire        w_dac_data_vld     [0:3];
 
     // =========================================================================
     // 1. Central Reset and Sync Generator Instantiation (rst_sync)
@@ -216,7 +215,7 @@ module dscope_main #(
     );
 
     // =========================================================================
-    // 2. Central Sequencer Instantiation
+    // 2. Central Sequencer Instantiation (with sub-sync outputs mapped)
     // =========================================================================
     sequencer u_sequencer (
         .sys_clk          (sys_clk),
@@ -237,8 +236,8 @@ module dscope_main #(
         .o_sys_sub_sync   (),
         .o_adc_sub_sync   (w_adc_sub_sync),
         .o_log_sub_sync   (),
-        .o_dac_sub_sync   (),
-        .o_hi_sub_sync    (),
+        .o_dac_sub_sync   (w_dac_sub_sync), // Real-time sub-trigger in dac_clk domain
+        .o_hi_sub_sync    (w_hi_sub_sync),  // Real-time sub-trigger in hi_clk domain
 
         .o_sys_sub_last   (),
         .o_adc_sub_last   (w_adc_sub_last),
@@ -252,6 +251,7 @@ module dscope_main #(
 
     // =========================================================================
     // 3. Central Parameter Register Manager Instantiation
+    //    (Updated to latch execution parameters per-sub-trigger step)
     // =========================================================================
     param u_param (
         .sys_clk               (sys_clk),
@@ -260,11 +260,15 @@ module dscope_main #(
 
         .adc_clk               (adc_clk),
         .adc_rst_n             (o_adc_rst_n),
-        .i_adc_sync            (o_adc_sync),
+        .i_adc_sync            (w_adc_sub_sync), // Sync to step sub-sync triggers
+
+        .dac_clk               (dac_clk),
+        .dac_rst_n             (o_dac_rst_n),
+        .i_dac_sync            (w_dac_sub_sync), // Sync to step sub-sync triggers
 
         .hi_clk                (hi_clk),
         .hi_rst_n              (o_hi_rst_n),
-        .i_hi_sync             (o_hi_sync),
+        .i_hi_sync             (w_hi_sub_sync),  // Sync to step sub-sync triggers
 
         .i_sys_vch_sel         (w_step_index),
 
@@ -322,42 +326,46 @@ module dscope_main #(
         .o_pulse_ch2_gen_mask  (o_pulse_ch2_gen_mask),
         .o_pulse_ch3_gen_mask  (o_pulse_ch3_gen_mask),
 
-        // Outputs for VGA/VRC Tune Controllers (sys_clk domain)
-        .o_tune_ch0_start_amp  (o_tune_ch0_start_amp),
-        .o_tune_ch0_amp_one    (o_tune_ch0_amp_one),
-        .o_tune_ch0_amp_two    (o_tune_ch0_amp_two),
-        .o_tune_ch0_vrc_len    (o_tune_ch0_vrc_len),
-        .o_tune_ch0_dac_min    (o_tune_ch0_dac_min),
-        .o_tune_ch0_dac_max    (o_tune_ch0_dac_max),
-        .o_tune_ch0_tune_mode  (o_tune_ch0_tune_mode),
-        .o_tune_ch0_log_offset (o_tune_ch0_log_offset),
+        // Outputs for VGA/VRC Tune Controllers (dac_clk domain)
+        .o_tune_ch0_start_amp  (w_tune_start_amp[0]),
+        .o_tune_ch0_drop_ticks (w_tune_drop_ticks[0]),
+        .o_tune_ch0_amp_one    (w_tune_amp_one[0]),
+        .o_tune_ch0_amp_two    (w_tune_amp_two[0]),
+        .o_tune_ch0_vrc_len    (w_tune_vrc_len[0]),
+        .o_tune_ch0_dac_min    (w_tune_dac_min[0]),
+        .o_tune_ch0_dac_max    (w_tune_dac_max[0]),
+        .o_tune_ch0_tune_mode  (w_tune_tune_mode[0]),
+        .o_tune_ch0_log_offset (w_tune_log_offset[0]),
 
-        .o_tune_ch1_start_amp  (o_tune_ch1_start_amp),
-        .o_tune_ch1_amp_one    (o_tune_ch1_amp_one),
-        .o_tune_ch1_amp_two    (o_tune_ch1_amp_two),
-        .o_tune_ch1_vrc_len    (o_tune_ch1_vrc_len),
-        .o_tune_ch1_dac_min    (o_tune_ch1_dac_min),
-        .o_tune_ch1_dac_max    (o_tune_ch1_dac_max),
-        .o_tune_ch1_tune_mode  (o_tune_ch1_tune_mode),
-        .o_tune_ch1_log_offset (o_tune_ch1_log_offset),
+        .o_tune_ch1_start_amp  (w_tune_start_amp[1]),
+        .o_tune_ch1_drop_ticks (w_tune_drop_ticks[1]),
+        .o_tune_ch1_amp_one    (w_tune_amp_one[1]),
+        .o_tune_ch1_amp_two    (w_tune_amp_two[1]),
+        .o_tune_ch1_vrc_len    (w_tune_vrc_len[1]),
+        .o_tune_ch1_dac_min    (w_tune_dac_min[1]),
+        .o_tune_ch1_dac_max    (w_tune_dac_max[1]),
+        .o_tune_ch1_tune_mode  (w_tune_tune_mode[1]),
+        .o_tune_ch1_log_offset (w_tune_log_offset[1]),
 
-        .o_tune_ch2_start_amp  (o_tune_ch2_start_amp),
-        .o_tune_ch2_amp_one    (o_tune_ch2_amp_one),
-        .o_tune_ch2_amp_two    (o_tune_ch2_amp_two),
-        .o_tune_ch2_vrc_len    (o_tune_ch2_vrc_len),
-        .o_tune_ch2_dac_min    (o_tune_ch2_dac_min),
-        .o_tune_ch2_dac_max    (o_tune_ch2_dac_max),
-        .o_tune_ch2_tune_mode  (o_tune_ch2_tune_mode),
-        .o_tune_ch2_log_offset (o_tune_ch2_log_offset),
+        .o_tune_ch2_start_amp  (w_tune_start_amp[2]),
+        .o_tune_ch2_drop_ticks (w_tune_drop_ticks[2]),
+        .o_tune_ch2_amp_one    (w_tune_amp_one[2]),
+        .o_tune_ch2_amp_two    (w_tune_amp_two[2]),
+        .o_tune_ch2_vrc_len    (w_tune_vrc_len[2]),
+        .o_tune_ch2_dac_min    (w_tune_dac_min[2]),
+        .o_tune_ch2_dac_max    (w_tune_dac_max[2]),
+        .o_tune_ch2_tune_mode  (w_tune_tune_mode[2]),
+        .o_tune_ch2_log_offset (w_tune_log_offset[2]),
 
-        .o_tune_ch3_start_amp  (o_tune_ch3_start_amp),
-        .o_tune_ch3_amp_one    (o_tune_ch3_amp_one),
-        .o_tune_ch3_amp_two    (o_tune_ch3_amp_two),
-        .o_tune_ch3_vrc_len    (o_tune_ch3_vrc_len),
-        .o_tune_ch3_dac_min    (o_tune_ch3_dac_min),
-        .o_tune_ch3_dac_max    (o_tune_ch3_dac_max),
-        .o_tune_ch3_tune_mode  (o_tune_ch3_tune_mode),
-        .o_tune_ch3_log_offset (o_tune_ch3_log_offset),
+        .o_tune_ch3_start_amp  (w_tune_start_amp[3]),
+        .o_tune_ch3_drop_ticks (w_tune_drop_ticks[3]),
+        .o_tune_ch3_amp_one    (w_tune_amp_one[3]),
+        .o_tune_ch3_amp_two    (w_tune_amp_two[3]),
+        .o_tune_ch3_vrc_len    (w_tune_vrc_len[3]),
+        .o_tune_ch3_dac_min    (w_tune_dac_min[3]),
+        .o_tune_ch3_dac_max    (w_tune_dac_max[3]),
+        .o_tune_ch3_tune_mode  (w_tune_tune_mode[3]),
+        .o_tune_ch3_log_offset (w_tune_log_offset[3]),
 
         // Two-coordinate Metadata Readout Interface for Packetizer
         .i_packet_phy_ch       (i_packet_phy_ch),
@@ -375,6 +383,7 @@ module dscope_main #(
         .o_sys_pulse_gen_mask  (o_sys_pulse_gen_mask),
 
         .o_sys_tune_start_amp  (o_sys_tune_start_amp),
+        .o_sys_tune_drop_ticks (o_sys_tune_drop_ticks),
         .o_sys_tune_amp_one    (o_sys_tune_amp_one),
         .o_sys_tune_amp_two    (o_sys_tune_amp_two),
         .o_sys_tune_vrc_len    (o_sys_tune_vrc_len),
@@ -436,6 +445,122 @@ module dscope_main #(
         .o_out_size          (o_out_size),
         .o_data_ready        (o_data_ready)
     );
+
+    // =========================================================================
+    // 5. 4-Channel VGA/TGC Curve Generators and SPI DAC Control Hub
+    // =========================================================================
+    genvar ch;
+    generate
+        for (ch = 0; ch < 4; ch = ch + 1) begin : gen_tgc_channels
+            
+            // 5.1 Real-Time Time-Gain-Compensation (TGC/VRC) sweep calculator
+            //     (Triggered on every sub-sync step in dac_clk domain)
+            tune #(
+                .GAIN_FRAC_WIDTH (16)
+            ) u_tune (
+                .dac_clk        (dac_clk),
+                .dac_rst_n      (o_dac_rst_n),
+                .i_dac_sync     (w_dac_sub_sync), // Triggered per-sub-trigger
+                
+                .i_start_amp    (w_tune_start_amp[ch]),
+                .i_drop_ticks   (w_tune_drop_ticks[ch]),
+                .i_amp_one      (w_tune_amp_one[ch]),
+                .i_amp_two      (w_tune_amp_two[ch]),
+                .i_vrc_len      (w_tune_vrc_len[ch]),
+                .i_dac_min      (w_tune_dac_min[ch]),
+                .i_dac_max      (w_tune_dac_max[ch]),
+                .i_tune_mode    (w_tune_tune_mode[ch]),
+                .i_log_offset   (w_tune_log_offset[ch]),
+
+                .o_dac_one      (w_dac_one_code[ch]),
+                .o_dac_two      (w_dac_two_code[ch]),
+                .o_dac_offset   (w_dac_offset_code[ch]),
+                .o_dac_data_vld (w_dac_data_vld[ch])
+            );
+
+            // 5.2 Dynamic update throttling state registers
+            reg [9:0] r_prev_dac_one;
+            reg       r_dac_one_wr;
+            wire      w_dac_one_busy;
+
+            reg [9:0] r_prev_dac_two;
+            reg       r_dac_two_wr;
+            wire      w_dac_two_busy;
+
+            reg [9:0] r_prev_dac_offset;
+            reg       r_dac_offset_wr;
+            wire      w_dac_offset_busy;
+
+            always @(posedge dac_clk) begin
+                if (!o_dac_rst_n) begin
+                    r_prev_dac_one    <= 10'd0;
+                    r_dac_one_wr      <= 1'b0;
+                    r_prev_dac_two    <= 10'd0;
+                    r_dac_two_wr      <= 1'b0;
+                    r_prev_dac_offset <= 10'd0;
+                    r_dac_offset_wr   <= 1'b0;
+                end else begin
+                    // Throttled VGA Stage 1 DAC Transmitter
+                    if (w_dac_data_vld[ch] && (w_dac_one_code[ch] != r_prev_dac_one) && !w_dac_one_busy && !r_dac_one_wr) begin
+                        r_dac_one_wr   <= 1'b1;
+                        r_prev_dac_one <= w_dac_one_code[ch];
+                    end else begin
+                        r_dac_one_wr   <= 1'b0;
+                    end
+
+                    // Throttled VGA Stage 2 DAC Transmitter
+                    if (w_dac_data_vld[ch] && (w_dac_two_code[ch] != r_prev_dac_two) && !w_dac_two_busy && !r_dac_two_wr) begin
+                        r_dac_two_wr   <= 1'b1;
+                        r_prev_dac_two <= w_dac_two_code[ch];
+                    end else begin
+                        r_dac_two_wr   <= 1'b0;
+                    end
+
+                    // Throttled Log Offset Calibration DAC Transmitter
+                    if (w_dac_data_vld[ch] && (w_dac_offset_code[ch] != r_prev_dac_offset) && !w_dac_offset_busy && !r_dac_offset_wr) begin
+                        r_dac_offset_wr   <= 1'b1;
+                        r_prev_dac_offset <= w_dac_offset_code[ch];
+                    end else begin
+                        r_dac_offset_wr   <= 1'b0;
+                    end
+                end
+            end
+
+            // 5.3 Physical TI DAC101S101 SPI Transmitters
+            spi_dac101s101 u_spi_dac_one (
+                .dac_clk    (dac_clk),
+                .dac_rst_n  (o_dac_rst_n),
+                .i_dac_data (r_prev_dac_one),
+                .i_dac_wr   (r_dac_one_wr),
+                .o_dac_busy (w_dac_one_busy),
+                .o_sclk     (o_dac_one_sclk[ch]),
+                .o_din      (o_dac_one_din[ch]),
+                .o_sync_n   (o_dac_one_sync_n[ch])
+            );
+
+            spi_dac101s101 u_spi_dac_two (
+                .dac_clk    (dac_clk),
+                .dac_rst_n  (o_dac_rst_n),
+                .i_dac_data (r_prev_dac_two),
+                .i_dac_wr   (r_dac_two_wr),
+                .o_dac_busy (w_dac_two_busy),
+                .o_sclk     (o_dac_two_sclk[ch]),
+                .o_din      (o_dac_two_din[ch]),
+                .o_sync_n   (o_dac_two_sync_n[ch])
+            );
+
+            spi_dac101s101 u_spi_dac_offset (
+                .dac_clk    (dac_clk),
+                .dac_rst_n  (o_dac_rst_n),
+                .i_dac_data (r_prev_dac_offset),
+                .i_dac_wr   (r_dac_offset_wr),
+                .o_dac_busy (w_dac_offset_busy),
+                .o_sclk     (o_dac_offset_sclk[ch]),
+                .o_din      (o_dac_offset_din[ch]),
+                .o_sync_n   (o_dac_offset_sync_n[ch])
+            );
+        end
+    endgenerate
 
 endmodule
 

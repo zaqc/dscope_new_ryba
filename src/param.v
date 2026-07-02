@@ -27,6 +27,7 @@
 
 // Группа: tune (параметры настройки тракта и ВАРУ)
 `define PARAM_DEFAULT_TUNE_START_AMP    11'd500
+`define PARAM_DEFAULT_TUNE_DROP_TICKS   16'd0
 `define PARAM_DEFAULT_TUNE_AMP_ONE      32'd0
 `define PARAM_DEFAULT_TUNE_AMP_TWO      32'd0
 `define PARAM_DEFAULT_TUNE_VRC_LEN      16'd0
@@ -45,6 +46,10 @@ module param (
     input  wire        adc_clk,
     input  wire        adc_rst_n,
     input  wire        i_adc_sync,     // Импульс запуска в adc_clk (o_adc_sync из rst_sync)
+
+    input  wire        dac_clk,
+    input  wire        dac_rst_n,      // Синхронный сброс домена dac_clk (o_dac_rst_n из rst_sync)
+    input  wire        i_dac_sync,     // Импульс запуска в dac_clk (o_dac_sync из rst_sync)
 
     input  wire        hi_clk,
     input  wire        hi_rst_n,
@@ -116,8 +121,9 @@ module param (
     output reg  [3:0]  o_pulse_ch2_gen_mask,    // Маска подключения генераторов для ch2
     output reg  [3:0]  o_pulse_ch3_gen_mask,    // Маска подключения генераторов для ch3
 
-    // Физические модули 3: tune (домен sys_clk, 4 параллельных тракта усиления)
+    // Физические модули 3: tune (домен dac_clk, 4 параллельных тракта усиления)
     output reg  [10:0] o_tune_ch0_start_amp,
+    output reg  [15:0] o_tune_ch0_drop_ticks,   // Задержка нарастания ВРЧ для ch0
     output reg  [31:0] o_tune_ch0_amp_one,
     output reg  [31:0] o_tune_ch0_amp_two,
     output reg  [15:0] o_tune_ch0_vrc_len,
@@ -127,6 +133,7 @@ module param (
     output reg  [9:0]  o_tune_ch0_log_offset,
 
     output reg  [10:0] o_tune_ch1_start_amp,
+    output reg  [15:0] o_tune_ch1_drop_ticks,   // Задержка нарастания ВРЧ для ch1
     output reg  [31:0] o_tune_ch1_amp_one,
     output reg  [31:0] o_tune_ch1_amp_two,
     output reg  [15:0] o_tune_ch1_vrc_len,
@@ -136,6 +143,7 @@ module param (
     output reg  [9:0]  o_tune_ch1_log_offset,
 
     output reg  [10:0] o_tune_ch2_start_amp,
+    output reg  [15:0] o_tune_ch2_drop_ticks,   // Задержка нарастания ВРЧ для ch2
     output reg  [31:0] o_tune_ch2_amp_one,
     output reg  [31:0] o_tune_ch2_amp_two,
     output reg  [15:0] o_tune_ch2_vrc_len,
@@ -145,6 +153,7 @@ module param (
     output reg  [9:0]  o_tune_ch2_log_offset,
 
     output reg  [10:0] o_tune_ch3_start_amp,
+    output reg  [15:0] o_tune_ch3_drop_ticks,   // Задержка нарастания ВРЧ для ch3
     output reg  [31:0] o_tune_ch3_amp_one,
     output reg  [31:0] o_tune_ch3_amp_two,
     output reg  [15:0] o_tune_ch3_vrc_len,
@@ -156,7 +165,7 @@ module param (
     // ==========================================
     // ИНТЕРФЕЙС ЧТЕНИЯ МЕТАДАННЫХ ДЛЯ ВЫХОДНОГО ПАКЕТА
     // ==========================================
-    // Двухкомпонентный адрес чтения сохраненного банка предыдущего измерения
+    // Двухкомпонентный адрес чтения сохраненного банка предыдущего измерения (домен sys_clk)
     input  wire [1:0]  i_packet_phy_ch,  // Запрашиваемый физический канал (0..3)
     input  wire [1:0]  i_packet_vch,     // Запрашиваемый виртуальный цикл (0..3)
 
@@ -175,6 +184,7 @@ module param (
 
     // Группа tune (для выбранных координат из замороженного банка)
     output reg  [10:0] o_sys_tune_start_amp,
+    output reg  [15:0] o_sys_tune_drop_ticks,   // Вычитанная задержка нарастания ВРЧ
     output reg  [31:0] o_sys_tune_amp_one,
     output reg  [31:0] o_sys_tune_amp_two,
     output reg  [15:0] o_sys_tune_vrc_len,
@@ -203,6 +213,7 @@ module param (
     reg [3:0]  hold_pulse_gen_mask   [0:15];
 
     reg [10:0] hold_tune_start_amp   [0:15];
+    reg [15:0] hold_tune_drop_ticks  [0:15];
     reg [31:0] hold_tune_amp_one     [0:15];
     reg [31:0] hold_tune_amp_two     [0:15];
     reg [15:0] hold_tune_vrc_len     [0:15];
@@ -231,6 +242,7 @@ module param (
                 hold_pulse_gen_mask[i]    <= `PARAM_DEFAULT_PULSE_GEN_MASK;
 
                 hold_tune_start_amp[i]    <= `PARAM_DEFAULT_TUNE_START_AMP;
+                hold_tune_drop_ticks[i]   <= `PARAM_DEFAULT_TUNE_DROP_TICKS;
                 hold_tune_amp_one[i]      <= `PARAM_DEFAULT_TUNE_AMP_ONE;
                 hold_tune_amp_two[i]      <= `PARAM_DEFAULT_TUNE_AMP_TWO;
                 hold_tune_vrc_len[i]      <= `PARAM_DEFAULT_TUNE_VRC_LEN;
@@ -274,6 +286,7 @@ module param (
                             hold_tune_tune_mode[w_cmd_idx]      <= i_cmd_data[21:20];
                         end
                         8'h06: hold_tune_log_offset[w_cmd_idx]  <= i_cmd_data[9:0];
+                        8'h07: hold_tune_drop_ticks[w_cmd_idx]  <= i_cmd_data[15:0];
                         default: ;
                     endcase
                 end
@@ -301,6 +314,7 @@ module param (
     reg [3:0]  bank_pulse_gen_mask   [0:31];
 
     reg [10:0] bank_tune_start_amp   [0:31];
+    reg [15:0] bank_tune_drop_ticks  [0:31];
     reg [31:0] bank_tune_amp_one     [0:31];
     reg [31:0] bank_tune_amp_two     [0:31];
     reg [15:0] bank_tune_vrc_len     [0:31];
@@ -326,6 +340,7 @@ module param (
                 bank_pulse_gen_mask[i]   <= `PARAM_DEFAULT_PULSE_GEN_MASK;
 
                 bank_tune_start_amp[i]   <= `PARAM_DEFAULT_TUNE_START_AMP;
+                bank_tune_drop_ticks[i]  <= `PARAM_DEFAULT_TUNE_DROP_TICKS;
                 bank_tune_amp_one[i]     <= `PARAM_DEFAULT_TUNE_AMP_ONE;
                 bank_tune_amp_two[i]     <= `PARAM_DEFAULT_TUNE_AMP_TWO;
                 bank_tune_vrc_len[i]     <= `PARAM_DEFAULT_TUNE_VRC_LEN;
@@ -339,27 +354,28 @@ module param (
             r_wr_ptr <= ~r_wr_ptr;
 
             // Копируем все параметры из теневых регистров в банк r_wr_ptr (до изменения указателя)
-            // bank_idx = {r_wr_ptr, i[3:0]}
+            // Безопасное вычисление flat-адреса без среза переменной "i"
             for (i = 0; i < 16; i = i + 1) begin
-                bank_ascan_n_samples[{r_wr_ptr, i[3:0]}]  <= hold_ascan_n_samples[i];
-                bank_ascan_accum[{r_wr_ptr, i[3:0]}]      <= hold_ascan_accum[i];
-                bank_ascan_accum_type[{r_wr_ptr, i[3:0]}] <= hold_ascan_accum_type[i];
-                bank_ascan_drop_ticks[{r_wr_ptr, i[3:0]}] <= hold_ascan_drop_ticks[i];
-                bank_ascan_pep_idx[{r_wr_ptr, i[3:0]}]    <= hold_ascan_pep_idx[i];
+                bank_ascan_n_samples[(r_wr_ptr ? 16 : 0) + i]  <= hold_ascan_n_samples[i];
+                bank_ascan_accum[(r_wr_ptr ? 16 : 0) + i]      <= hold_ascan_accum[i];
+                bank_ascan_accum_type[(r_wr_ptr ? 16 : 0) + i] <= hold_ascan_accum_type[i];
+                bank_ascan_drop_ticks[(r_wr_ptr ? 16 : 0) + i] <= hold_ascan_drop_ticks[i];
+                bank_ascan_pep_idx[(r_wr_ptr ? 16 : 0) + i]    <= hold_ascan_pep_idx[i];
 
-                bank_pulse_charge[{r_wr_ptr, i[3:0]}]     <= hold_pulse_charge[i];
-                bank_pulse_transfer[{r_wr_ptr, i[3:0]}]   <= hold_pulse_transfer[i];
-                bank_pulse_strike[{r_wr_ptr, i[3:0]}]     <= hold_pulse_strike[i];
-                bank_pulse_gen_mask[{r_wr_ptr, i[3:0]}]   <= hold_pulse_gen_mask[i];
+                bank_pulse_charge[(r_wr_ptr ? 16 : 0) + i]     <= hold_pulse_charge[i];
+                bank_pulse_transfer[(r_wr_ptr ? 16 : 0) + i]   <= hold_pulse_transfer[i];
+                bank_pulse_strike[(r_wr_ptr ? 16 : 0) + i]     <= hold_pulse_strike[i];
+                bank_pulse_gen_mask[(r_wr_ptr ? 16 : 0) + i]   <= hold_pulse_gen_mask[i];
 
-                bank_tune_start_amp[{r_wr_ptr, i[3:0]}]   <= hold_tune_start_amp[i];
-                bank_tune_amp_one[{r_wr_ptr, i[3:0]}]     <= hold_tune_amp_one[i];
-                bank_tune_amp_two[{r_wr_ptr, i[3:0]}]     <= hold_tune_amp_two[i];
-                bank_tune_vrc_len[{r_wr_ptr, i[3:0]}]     <= hold_tune_vrc_len[i];
-                bank_tune_dac_min[{r_wr_ptr, i[3:0]}]     <= hold_tune_dac_min[i];
-                bank_tune_dac_max[{r_wr_ptr, i[3:0]}]     <= hold_tune_dac_max[i];
-                bank_tune_tune_mode[{r_wr_ptr, i[3:0]}]   <= hold_tune_tune_mode[i];
-                bank_tune_log_offset[{r_wr_ptr, i[3:0]}]  <= hold_tune_log_offset[i];
+                bank_tune_start_amp[(r_wr_ptr ? 16 : 0) + i]   <= hold_tune_start_amp[i];
+                bank_tune_drop_ticks[(r_wr_ptr ? 16 : 0) + i]  <= hold_tune_drop_ticks[i];
+                bank_tune_amp_one[(r_wr_ptr ? 16 : 0) + i]     <= hold_tune_amp_one[i];
+                bank_tune_amp_two[(r_wr_ptr ? 16 : 0) + i]     <= hold_tune_amp_two[i];
+                bank_tune_vrc_len[(r_wr_ptr ? 16 : 0) + i]     <= hold_tune_vrc_len[i];
+                bank_tune_dac_min[(r_wr_ptr ? 16 : 0) + i]     <= hold_tune_dac_min[i];
+                bank_tune_dac_max[(r_wr_ptr ? 16 : 0) + i]     <= hold_tune_dac_max[i];
+                bank_tune_tune_mode[(r_wr_ptr ? 16 : 0) + i]   <= hold_tune_tune_mode[i];
+                bank_tune_log_offset[(r_wr_ptr ? 16 : 0) + i]  <= hold_tune_log_offset[i];
             end
         end
     end
@@ -373,18 +389,19 @@ module param (
     wire active_sel = ~r_wr_ptr; // Селектор для текущего физического исполнения (новые параметры)
     wire sys_sel    = r_wr_ptr;  // Селектор для метаданных пакета результатов (замороженный банк)
 
-    // Одномерные индексы доступа для 4-х физических каналов исполнения
-    wire [4:0] active_idx_ch0 = {active_sel, 2'd0, i_sys_vch_sel};
-    wire [4:0] active_idx_ch1 = {active_sel, 2'd1, i_sys_vch_sel};
-    wire [4:0] active_idx_ch2 = {active_sel, 2'd2, i_sys_vch_sel};
-    wire [4:0] active_idx_ch3 = {active_sel, 2'd3, i_sys_vch_sel};
+    // Одномерные индексы доступа для 4-х физических каналов исполнения.
+    // Реализованы с помощью сдвигов и логического ИЛИ во избежание предупреждений компилятора.
+    wire [4:0] active_idx_ch0 = (active_sel << 4) | (2'd0 << 2) | i_sys_vch_sel;
+    wire [4:0] active_idx_ch1 = (active_sel << 4) | (2'd1 << 2) | i_sys_vch_sel;
+    wire [4:0] active_idx_ch2 = (active_sel << 4) | (2'd2 << 2) | i_sys_vch_sel;
+    wire [4:0] active_idx_ch3 = (active_sel << 4) | (2'd3 << 2) | i_sys_vch_sel;
 
     // Одномерный индекс доступа для чтения пакета результатов предыдущего измерения
-    wire [4:0] packet_read_idx = {sys_sel, i_packet_phy_ch, i_packet_vch};
+    wire [4:0] packet_read_idx = (sys_sel << 4) | (i_packet_phy_ch << 2) | i_packet_vch;
 
     // =========================================================================
     // 4. Формирование стабильных мультиплексированных сигналов в домене sys_clk
-    //    для безопасного переноса через CDC по синкоимпульсам
+    //    для безопасного переноса через CDC по синхроимпульсам
     // =========================================================================
     wire [15:0] sys_ascan_n_samples  [0:3];
     wire [7:0]  sys_ascan_accum      [0:3];
@@ -395,11 +412,21 @@ module param (
     wire [15:0] sys_pulse_transfer   [0:3];
     wire [7:0]  sys_pulse_strike     [0:3];
 
+    wire [10:0] sys_tune_start_amp   [0:3];
+    wire [15:0] sys_tune_drop_ticks  [0:3];
+    wire [31:0] sys_tune_amp_one     [0:3];
+    wire [31:0] sys_tune_amp_two     [0:3];
+    wire [15:0] sys_tune_vrc_len     [0:3];
+    wire [9:0]  sys_tune_dac_min     [0:3];
+    wire [9:0]  sys_tune_dac_max     [0:3];
+    wire [1:0]  sys_tune_tune_mode   [0:3];
+    wire [9:0]  sys_tune_log_offset  [0:3];
+
     genvar ch;
     generate
         for (ch = 0; ch < 4; ch = ch + 1) begin : gen_sys_mux
-            // Вычисление локального индекса канала внутри генератора
-            wire [4:0] active_ch_idx = {active_sel, ch[1:0], i_sys_vch_sel};
+            // Локальный индекс канала внутри генератора собран сдвигом (безопасно для genvar)
+            wire [4:0] active_ch_idx = (active_sel << 4) | (ch << 2) | i_sys_vch_sel;
 
             assign sys_ascan_n_samples[ch]  = bank_ascan_n_samples [active_ch_idx];
             assign sys_ascan_accum[ch]      = bank_ascan_accum     [active_ch_idx];
@@ -409,6 +436,16 @@ module param (
             assign sys_pulse_charge[ch]     = bank_pulse_charge    [active_ch_idx];
             assign sys_pulse_transfer[ch]   = bank_pulse_transfer  [active_ch_idx];
             assign sys_pulse_strike[ch]     = bank_pulse_strike    [active_ch_idx];
+
+            assign sys_tune_start_amp[ch]   = bank_tune_start_amp  [active_ch_idx];
+            assign sys_tune_drop_ticks[ch]  = bank_tune_drop_ticks [active_ch_idx];
+            assign sys_tune_amp_one[ch]     = bank_tune_amp_one    [active_ch_idx];
+            assign sys_tune_amp_two[ch]     = bank_tune_amp_two    [active_ch_idx];
+            assign sys_tune_vrc_len[ch]     = bank_tune_vrc_len    [active_ch_idx];
+            assign sys_tune_dac_min[ch]     = bank_tune_dac_min    [active_ch_idx];
+            assign sys_tune_dac_max[ch]     = bank_tune_dac_max    [active_ch_idx];
+            assign sys_tune_tune_mode[ch]   = bank_tune_tune_mode  [active_ch_idx];
+            assign sys_tune_log_offset[ch]  = bank_tune_log_offset [active_ch_idx];
         end
     endgenerate
 
@@ -427,46 +464,6 @@ module param (
             o_pulse_ch1_gen_mask  <= `PARAM_DEFAULT_PULSE_GEN_MASK;
             o_pulse_ch2_gen_mask  <= `PARAM_DEFAULT_PULSE_GEN_MASK;
             o_pulse_ch3_gen_mask  <= `PARAM_DEFAULT_PULSE_GEN_MASK;
-
-            // Сброс тракта tune ch0
-            o_tune_ch0_start_amp  <= `PARAM_DEFAULT_TUNE_START_AMP;
-            o_tune_ch0_amp_one    <= `PARAM_DEFAULT_TUNE_AMP_ONE;
-            o_tune_ch0_amp_two    <= `PARAM_DEFAULT_TUNE_AMP_TWO;
-            o_tune_ch0_vrc_len    <= `PARAM_DEFAULT_TUNE_VRC_LEN;
-            o_tune_ch0_dac_min    <= `PARAM_DEFAULT_TUNE_DAC_MIN;
-            o_tune_ch0_dac_max    <= `PARAM_DEFAULT_TUNE_DAC_MAX;
-            o_tune_ch0_tune_mode  <= `PARAM_DEFAULT_TUNE_TUNE_MODE;
-            o_tune_ch0_log_offset <= `PARAM_DEFAULT_TUNE_LOG_OFFSET;
-
-            // Сброс тракта tune ch1
-            o_tune_ch1_start_amp  <= `PARAM_DEFAULT_TUNE_START_AMP;
-            o_tune_ch1_amp_one    <= `PARAM_DEFAULT_TUNE_AMP_ONE;
-            o_tune_ch1_amp_two    <= `PARAM_DEFAULT_TUNE_AMP_TWO;
-            o_tune_ch1_vrc_len    <= `PARAM_DEFAULT_TUNE_VRC_LEN;
-            o_tune_ch1_dac_min    <= `PARAM_DEFAULT_TUNE_DAC_MIN;
-            o_tune_ch1_dac_max    <= `PARAM_DEFAULT_TUNE_DAC_MAX;
-            o_tune_ch1_tune_mode  <= `PARAM_DEFAULT_TUNE_TUNE_MODE;
-            o_tune_ch1_log_offset <= `PARAM_DEFAULT_TUNE_LOG_OFFSET;
-
-            // Сброс тракта tune ch2
-            o_tune_ch2_start_amp  <= `PARAM_DEFAULT_TUNE_START_AMP;
-            o_tune_ch2_amp_one    <= `PARAM_DEFAULT_TUNE_AMP_ONE;
-            o_tune_ch2_amp_two    <= `PARAM_DEFAULT_TUNE_AMP_TWO;
-            o_tune_ch2_vrc_len    <= `PARAM_DEFAULT_TUNE_VRC_LEN;
-            o_tune_ch2_dac_min    <= `PARAM_DEFAULT_TUNE_DAC_MIN;
-            o_tune_ch2_dac_max    <= `PARAM_DEFAULT_TUNE_DAC_MAX;
-            o_tune_ch2_tune_mode  <= `PARAM_DEFAULT_TUNE_TUNE_MODE;
-            o_tune_ch2_log_offset <= `PARAM_DEFAULT_TUNE_LOG_OFFSET;
-
-            // Сброс тракта tune ch3
-            o_tune_ch3_start_amp  <= `PARAM_DEFAULT_TUNE_START_AMP;
-            o_tune_ch3_amp_one    <= `PARAM_DEFAULT_TUNE_AMP_ONE;
-            o_tune_ch3_amp_two    <= `PARAM_DEFAULT_TUNE_AMP_TWO;
-            o_tune_ch3_vrc_len    <= `PARAM_DEFAULT_TUNE_VRC_LEN;
-            o_tune_ch3_dac_min    <= `PARAM_DEFAULT_TUNE_DAC_MIN;
-            o_tune_ch3_dac_max    <= `PARAM_DEFAULT_TUNE_DAC_MAX;
-            o_tune_ch3_tune_mode  <= `PARAM_DEFAULT_TUNE_TUNE_MODE;
-            o_tune_ch3_log_offset <= `PARAM_DEFAULT_TUNE_LOG_OFFSET;
         end else begin
             // Коммутаторы физических трактов (sys_clk)
             o_ascan_ch0_pep_idx   <= bank_ascan_pep_idx[active_idx_ch0];
@@ -478,46 +475,6 @@ module param (
             o_pulse_ch1_gen_mask  <= bank_pulse_gen_mask[active_idx_ch1];
             o_pulse_ch2_gen_mask  <= bank_pulse_gen_mask[active_idx_ch2];
             o_pulse_ch3_gen_mask  <= bank_pulse_gen_mask[active_idx_ch3];
-
-            // Тракт tune ch0
-            o_tune_ch0_start_amp  <= bank_tune_start_amp [active_idx_ch0];
-            o_tune_ch0_amp_one    <= bank_tune_amp_one   [active_idx_ch0];
-            o_tune_ch0_amp_two    <= bank_tune_amp_two   [active_idx_ch0];
-            o_tune_ch0_vrc_len    <= bank_tune_vrc_len   [active_idx_ch0];
-            o_tune_ch0_dac_min    <= bank_tune_dac_min   [active_idx_ch0];
-            o_tune_ch0_dac_max    <= bank_tune_dac_max   [active_idx_ch0];
-            o_tune_ch0_tune_mode  <= bank_tune_tune_mode [active_idx_ch0];
-            o_tune_ch0_log_offset <= bank_tune_log_offset[active_idx_ch0];
-
-            // Тракт tune ch1
-            o_tune_ch1_start_amp  <= bank_tune_start_amp [active_idx_ch1];
-            o_tune_ch1_amp_one    <= bank_tune_amp_one   [active_idx_ch1];
-            o_tune_ch1_amp_two    <= bank_tune_amp_two   [active_idx_ch1];
-            o_tune_ch1_vrc_len    <= bank_tune_vrc_len   [active_idx_ch1];
-            o_tune_ch1_dac_min    <= bank_tune_dac_min   [active_idx_ch1];
-            o_tune_ch1_dac_max    <= bank_tune_dac_max   [active_idx_ch1];
-            o_tune_ch1_tune_mode  <= bank_tune_tune_mode [active_idx_ch1];
-            o_tune_ch1_log_offset <= bank_tune_log_offset[active_idx_ch1];
-
-            // Тракт tune ch2
-            o_tune_ch2_start_amp  <= bank_tune_start_amp [active_idx_ch2];
-            o_tune_ch2_amp_one    <= bank_tune_amp_one   [active_idx_ch2];
-            o_tune_ch2_amp_two    <= bank_tune_amp_two   [active_idx_ch2];
-            o_tune_ch2_vrc_len    <= bank_tune_vrc_len   [active_idx_ch2];
-            o_tune_ch2_dac_min    <= bank_tune_dac_min   [active_idx_ch2];
-            o_tune_ch2_dac_max    <= bank_tune_dac_max   [active_idx_ch2];
-            o_tune_ch2_tune_mode  <= bank_tune_tune_mode [active_idx_ch2];
-            o_tune_ch2_log_offset <= bank_tune_log_offset[active_idx_ch2];
-
-            // Тракт tune ch3
-            o_tune_ch3_start_amp  <= bank_tune_start_amp [active_idx_ch3];
-            o_tune_ch3_amp_one    <= bank_tune_amp_one   [active_idx_ch3];
-            o_tune_ch3_amp_two    <= bank_tune_amp_two   [active_idx_ch3];
-            o_tune_ch3_vrc_len    <= bank_tune_vrc_len   [active_idx_ch3];
-            o_tune_ch3_dac_min    <= bank_tune_dac_min   [active_idx_ch3];
-            o_tune_ch3_dac_max    <= bank_tune_dac_max   [active_idx_ch3];
-            o_tune_ch3_tune_mode  <= bank_tune_tune_mode [active_idx_ch3];
-            o_tune_ch3_log_offset <= bank_tune_log_offset[active_idx_ch3];
         end
     end
 
@@ -571,7 +528,103 @@ module param (
     end
 
     // =========================================================================
-    // 7. Междоменный перенос (CDC) в домен pulse (hi_clk) по сигналу i_hi_sync
+    // 7. Междоменный перенос (CDC) в домен ВАРУ (dac_clk) по сигналу i_dac_sync
+    // =========================================================================
+    always @(posedge dac_clk) begin
+        if (!dac_rst_n) begin
+            // Сброс тракта ch0
+            o_tune_ch0_start_amp   <= `PARAM_DEFAULT_TUNE_START_AMP;
+            o_tune_ch0_drop_ticks  <= `PARAM_DEFAULT_TUNE_DROP_TICKS;
+            o_tune_ch0_amp_one     <= `PARAM_DEFAULT_TUNE_AMP_ONE;
+            o_tune_ch0_amp_two     <= `PARAM_DEFAULT_TUNE_AMP_TWO;
+            o_tune_ch0_vrc_len     <= `PARAM_DEFAULT_TUNE_VRC_LEN;
+            o_tune_ch0_dac_min     <= `PARAM_DEFAULT_TUNE_DAC_MIN;
+            o_tune_ch0_dac_max     <= `PARAM_DEFAULT_TUNE_DAC_MAX;
+            o_tune_ch0_tune_mode   <= `PARAM_DEFAULT_TUNE_TUNE_MODE;
+            o_tune_ch0_log_offset  <= `PARAM_DEFAULT_TUNE_LOG_OFFSET;
+
+            // Сброс тракта ch1
+            o_tune_ch1_start_amp   <= `PARAM_DEFAULT_TUNE_START_AMP;
+            o_tune_ch1_drop_ticks  <= `PARAM_DEFAULT_TUNE_DROP_TICKS;
+            o_tune_ch1_amp_one     <= `PARAM_DEFAULT_TUNE_AMP_ONE;
+            o_tune_ch1_amp_two     <= `PARAM_DEFAULT_TUNE_AMP_TWO;
+            o_tune_ch1_vrc_len     <= `PARAM_DEFAULT_TUNE_VRC_LEN;
+            o_tune_ch1_dac_min     <= `PARAM_DEFAULT_TUNE_DAC_MIN;
+            o_tune_ch1_dac_max     <= `PARAM_DEFAULT_TUNE_DAC_MAX;
+            o_tune_ch1_tune_mode   <= `PARAM_DEFAULT_TUNE_TUNE_MODE;
+            o_tune_ch1_log_offset  <= `PARAM_DEFAULT_TUNE_LOG_OFFSET;
+
+            // Сброс тракта ch2
+            o_tune_ch2_start_amp   <= `PARAM_DEFAULT_TUNE_START_AMP;
+            o_tune_ch2_drop_ticks  <= `PARAM_DEFAULT_TUNE_DROP_TICKS;
+            o_tune_ch2_amp_one     <= `PARAM_DEFAULT_TUNE_AMP_ONE;
+            o_tune_ch2_amp_two     <= `PARAM_DEFAULT_TUNE_AMP_TWO;
+            o_tune_ch2_vrc_len     <= `PARAM_DEFAULT_TUNE_VRC_LEN;
+            o_tune_ch2_dac_min     <= `PARAM_DEFAULT_TUNE_DAC_MIN;
+            o_tune_ch2_dac_max     <= `PARAM_DEFAULT_TUNE_DAC_MAX;
+            o_tune_ch2_tune_mode   <= `PARAM_DEFAULT_TUNE_TUNE_MODE;
+            o_tune_ch2_log_offset  <= `PARAM_DEFAULT_TUNE_LOG_OFFSET;
+
+            // Сброс тракта ch3
+            o_tune_ch3_start_amp   <= `PARAM_DEFAULT_TUNE_START_AMP;
+            o_tune_ch3_drop_ticks  <= `PARAM_DEFAULT_TUNE_DROP_TICKS;
+            o_tune_ch3_amp_one     <= `PARAM_DEFAULT_TUNE_AMP_ONE;
+            o_tune_ch3_amp_two     <= `PARAM_DEFAULT_TUNE_AMP_TWO;
+            o_tune_ch3_vrc_len     <= `PARAM_DEFAULT_TUNE_VRC_LEN;
+            o_tune_ch3_dac_min     <= `PARAM_DEFAULT_TUNE_DAC_MIN;
+            o_tune_ch3_dac_max     <= `PARAM_DEFAULT_TUNE_DAC_MAX;
+            o_tune_ch3_tune_mode   <= `PARAM_DEFAULT_TUNE_TUNE_MODE;
+            o_tune_ch3_log_offset  <= `PARAM_DEFAULT_TUNE_LOG_OFFSET;
+        end else if (i_dac_sync) begin
+            // Защелкивание стабильных шин из домена sys_clk
+            // Тракт ch0
+            o_tune_ch0_start_amp   <= sys_tune_start_amp[0];
+            o_tune_ch0_drop_ticks  <= sys_tune_drop_ticks[0];
+            o_tune_ch0_amp_one     <= sys_tune_amp_one[0];
+            o_tune_ch0_amp_two     <= sys_tune_amp_two[0];
+            o_tune_ch0_vrc_len     <= sys_tune_vrc_len[0];
+            o_tune_ch0_dac_min     <= sys_tune_dac_min[0];
+            o_tune_ch0_dac_max     <= sys_tune_dac_max[0];
+            o_tune_ch0_tune_mode   <= sys_tune_tune_mode[0];
+            o_tune_ch0_log_offset  <= sys_tune_log_offset[0];
+
+            // Тракт ch1
+            o_tune_ch1_start_amp   <= sys_tune_start_amp[1];
+            o_tune_ch1_drop_ticks  <= sys_tune_drop_ticks[1];
+            o_tune_ch1_amp_one     <= sys_tune_amp_one[1];
+            o_tune_ch1_amp_two     <= sys_tune_amp_two[1];
+            o_tune_ch1_vrc_len     <= sys_tune_vrc_len[1];
+            o_tune_ch1_dac_min     <= sys_tune_dac_min[1];
+            o_tune_ch1_dac_max     <= sys_tune_dac_max[1];
+            o_tune_ch1_tune_mode   <= sys_tune_tune_mode[1];
+            o_tune_ch1_log_offset  <= sys_tune_log_offset[1];
+
+            // Тракт ch2
+            o_tune_ch2_start_amp   <= sys_tune_start_amp[2];
+            o_tune_ch2_drop_ticks  <= sys_tune_drop_ticks[2];
+            o_tune_ch2_amp_one     <= sys_tune_amp_one[2];
+            o_tune_ch2_amp_two     <= sys_tune_amp_two[2];
+            o_tune_ch2_vrc_len     <= sys_tune_vrc_len[2];
+            o_tune_ch2_dac_min     <= sys_tune_dac_min[2];
+            o_tune_ch2_dac_max     <= sys_tune_dac_max[2];
+            o_tune_ch2_tune_mode   <= sys_tune_tune_mode[2];
+            o_tune_ch2_log_offset  <= sys_tune_log_offset[2];
+
+            // Тракт ch3
+            o_tune_ch3_start_amp   <= sys_tune_start_amp[3];
+            o_tune_ch3_drop_ticks  <= sys_tune_drop_ticks[3];
+            o_tune_ch3_amp_one     <= sys_tune_amp_one[3];
+            o_tune_ch3_amp_two     <= sys_tune_amp_two[3];
+            o_tune_ch3_vrc_len     <= sys_tune_vrc_len[3];
+            o_tune_ch3_dac_min     <= sys_tune_dac_min[3];
+            o_tune_ch3_dac_max     <= sys_tune_dac_max[3];
+            o_tune_ch3_tune_mode   <= sys_tune_tune_mode[3];
+            o_tune_ch3_log_offset  <= sys_tune_log_offset[3];
+        end
+    end
+
+    // =========================================================================
+    // 8. Междоменный перенос (CDC) в домен pulse (hi_clk) по сигналу i_hi_sync
     // =========================================================================
     always @(posedge hi_clk) begin
         if (!hi_rst_n) begin
@@ -612,7 +665,7 @@ module param (
     end
 
     // =========================================================================
-    // 8. Порты пакетного вывода (Домен sys_clk, чтение из "замороженного" банка)
+    // 9. Порты пакетного вывода (Домен sys_clk, чтение из "замороженного" банка)
     // =========================================================================
     always @(posedge sys_clk) begin
         if (!sys_rst_n) begin
@@ -628,6 +681,7 @@ module param (
             o_sys_pulse_gen_mask   <= `PARAM_DEFAULT_PULSE_GEN_MASK;
 
             o_sys_tune_start_amp   <= `PARAM_DEFAULT_TUNE_START_AMP;
+            o_sys_tune_drop_ticks  <= `PARAM_DEFAULT_TUNE_DROP_TICKS;
             o_sys_tune_amp_one     <= `PARAM_DEFAULT_TUNE_AMP_ONE;
             o_sys_tune_amp_two     <= `PARAM_DEFAULT_TUNE_AMP_TWO;
             o_sys_tune_vrc_len     <= `PARAM_DEFAULT_TUNE_VRC_LEN;
@@ -649,6 +703,7 @@ module param (
             o_sys_pulse_gen_mask   <= bank_pulse_gen_mask  [packet_read_idx];
 
             o_sys_tune_start_amp   <= bank_tune_start_amp  [packet_read_idx];
+            o_sys_tune_drop_ticks  <= bank_tune_drop_ticks [packet_read_idx];
             o_sys_tune_amp_one     <= bank_tune_amp_one    [packet_read_idx];
             o_sys_tune_amp_two     <= bank_tune_amp_two    [packet_read_idx];
             o_sys_tune_vrc_len     <= bank_tune_vrc_len    [packet_read_idx];
